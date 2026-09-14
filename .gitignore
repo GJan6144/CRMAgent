@@ -1,0 +1,48 @@
+# ---- 依赖 ----
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ---- 构建产物 ----
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+
+# ---- 运行时数据 / 本地状态 ----
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+chat.db
+agent_state.db
+agent_config.json
+large_tool_results/
+
+# ---- 密钥与本地配置（模板 .env.example 保留）----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+token.json
+cookies.txt
+
+# ---- 本地备份 / 验证产物 ----
+_data_backup_*/
+_db_backup*/
+_panel_screenshots/
+
+# ---- 编辑器 / 系统 ----
+.DS_Store
+Thumbs.db
+.idea/
+*.log
