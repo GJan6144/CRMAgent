@@ -1,0 +1,1453 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deep Agents Chat</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --bg-primary: #ffffff;
+            --bg-sidebar: #f9f9f9;
+            --bg-hover: #ececec;
+            --bg-active: #e3e3e3;
+            --bg-input: #f0f0f0;
+            --bg-user-bubble: #dceaff;
+            --bg-ai-bubble: #f1f1f1;
+            --bg-tool: #fff8e1;
+            --text-primary: #1a1a1a;
+            --text-secondary: #8e8e8e;
+            --text-muted: #b0b0b0;
+            --text-user-bubble: #1a1a1a;
+            --text-tool: #b8860b;
+            --border: #e5e5e5;
+            --accent: #4d6bfe;
+            --accent-hover: #3b56d4;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            height: 100vh;
+            display: flex;
+            overflow: hidden;
+            font-size: 15px;
+            line-height: 1.6;
+        }
+
+        .sidebar {
+            width: 280px;
+            min-width: 280px;
+            background: var(--bg-sidebar);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            transition: margin-left 0.3s ease, width 0.3s ease, min-width 0.3s ease;
+            overflow: hidden;
+        }
+        .sidebar.collapsed { margin-left: -256px; width: 44px; min-width: 44px; }
+        .sidebar.collapsed .sidebar-content { display: none; }
+        .sidebar.collapsed .sidebar-collapsed-bar { display: flex; }
+        .sidebar-collapsed-bar { display: none; position: absolute; top: 0; left: 0; width: 44px; height: 100%; flex-direction: column; align-items: center; padding-top: 16px; gap: 8px; background: var(--bg-sidebar); }
+        .sidebar-collapsed-bar button { background: none; border: none; color: var(--text-secondary); cursor: pointer; padding: 6px; border-radius: 6px; transition: all 0.15s; }
+        .sidebar-collapsed-bar button:hover { background: var(--bg-hover); color: var(--text-primary); }
+        .sidebar-collapsed-bar svg { width: 20px; height: 20px; }
+
+        .sidebar-header { padding: 16px; }
+        .logo { font-size: 18px; font-weight: 700; color: var(--accent); display: flex; align-items: center; gap: 8px; }
+        .logo svg { width: 24px; height: 24px; }
+
+        .new-chat-btn {
+            margin: 8px 12px 12px; padding: 12px 16px; background: var(--accent); color: white;
+            border: none; border-radius: 10px; font-size: 14px; font-weight: 500; cursor: pointer;
+            display: flex; align-items: center; justify-content: center; gap: 8px; transition: background 0.2s;
+        }
+        .new-chat-btn:hover { background: var(--accent-hover); }
+
+        .session-list { flex: 1; overflow-y: auto; padding: 0 8px; }
+        .session-list::-webkit-scrollbar { width: 6px; }
+        .session-list::-webkit-scrollbar-thumb { background: #ddd; border-radius: 3px; }
+        .session-item { padding: 12px 14px; border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; transition: background 0.15s; }
+        .session-item:hover { background: var(--bg-hover); }
+        .session-item.active { background: var(--bg-active); }
+        .session-title { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+
+        .sidebar-footer { padding: 12px 16px; border-top: 1px solid var(--border); }
+        .model-badge { background: var(--bg-hover); padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; color: var(--accent); }
+        .sidebar-toggle-btn { display: flex; align-items: center; background: var(--bg-input); border: 0.5px solid var(--border); border-radius: 8px; cursor: pointer; padding: 5px 7px; color: var(--text-secondary); transition: all 0.15s; }
+        .sidebar-toggle-btn:hover { background: var(--bg-active); color: var(--text-primary); border-color: var(--accent); }
+        .sidebar-toggle-btn svg { width: 18px; height: 18px; stroke-width: 2.5; }
+
+        .chat-area { flex: 1; display: flex; flex-direction: column; background: var(--bg-primary); min-width: 0; }
+        .chat-header { padding: 14px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; min-height: 56px; }
+
+        /* Run State Indicator */
+        .run-state { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 16px; background: var(--bg-input); font-size: 12px; color: var(--text-secondary); transition: all 0.2s; }
+        .run-state-dot { width: 8px; height: 8px; border-radius: 50%; background: #bbb; flex-shrink: 0; }
+        .run-state.idle .run-state-dot { background: #bbb; }
+        .run-state.running .run-state-dot { background: #4d6bfe; animation: pulse 1.2s infinite; }
+        .run-state.thinking .run-state-dot { background: #a070d0; animation: pulse 1.2s infinite; }
+        .run-state.tool .run-state-dot { background: #f59e0b; animation: pulse 1.2s infinite; }
+        .run-state.done .run-state-dot { background: #2e9e5b; }
+        .run-state.error .run-state-dot { background: #e44; }
+        .run-state.running, .run-state.thinking, .run-state.tool { color: var(--text-primary); }
+        .run-state.done { color: #2e9e5b; }
+        .run-state.error { color: #e44; }
+        @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.7); } }
+        .chat-title { font-size: 16px; font-weight: 600; flex: 1; }
+        .menu-toggle { display: flex; align-items: center; gap: 4px; background: none; border: none; font-size: 18px; cursor: pointer; color: var(--text-secondary); padding: 4px 6px; border-radius: 6px; transition: background 0.15s; }
+        .menu-toggle:hover { background: var(--bg-hover); color: var(--text-primary); }
+        .menu-toggle svg { width: 18px; height: 18px; }
+
+        /* Right-side Context Panel */
+        .context-panel { width: 360px; min-width: 360px; background: var(--bg-sidebar); border-left: 1px solid var(--border); display: flex; flex-direction: column; transition: margin-right 0.3s ease, width 0.3s ease, min-width 0.3s ease; overflow: hidden; }
+        .context-panel.collapsed { margin-right: -360px; width: 0; min-width: 0; border-left: none; }
+        .context-panel-header { padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; min-height: 56px; }
+        .context-tabs { display: flex; gap: 4px; flex: 1; }
+        .context-tab { background: none; border: 0.5px solid transparent; border-radius: 8px; padding: 5px 10px; font-size: 13px; color: var(--text-secondary); cursor: pointer; font-family: inherit; transition: all 0.15s; }
+        .context-tab:hover { background: var(--bg-hover); color: var(--text-primary); }
+        .context-tab.active { background: var(--bg-input); color: var(--accent); border-color: var(--border); font-weight: 600; }
+        .context-close-btn { background: none; border: none; color: var(--text-secondary); cursor: pointer; padding: 4px; border-radius: 6px; display: flex; align-items: center; }
+        .context-close-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+        .context-close-btn svg { width: 16px; height: 16px; }
+        .context-body { flex: 1; overflow-y: auto; padding: 8px; }
+        .context-body::-webkit-scrollbar { width: 6px; }
+        .context-body::-webkit-scrollbar-thumb { background: #ddd; border-radius: 3px; }
+        .context-section { margin-bottom: 10px; border: 0.5px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg-input); }
+        .context-section-header { display: flex; align-items: center; gap: 6px; padding: 8px 10px; cursor: pointer; user-select: none; font-size: 12px; font-weight: 600; color: var(--text-primary); }
+        .context-section-header:hover { background: var(--bg-hover); }
+        .context-section-count { margin-left: auto; font-size: 11px; color: var(--text-secondary); font-weight: 400; }
+        .context-section-toggle { color: var(--text-secondary); transition: transform 0.2s; font-size: 10px; }
+        .context-section.open .context-section-toggle { transform: rotate(180deg); }
+        .context-section-content { display: none; padding: 8px 10px; border-top: 0.5px solid var(--border); font-size: 12px; line-height: 1.6; color: var(--text-secondary); white-space: pre-wrap; word-break: break-word; max-height: 400px; overflow-y: auto; }
+        .context-section.open .context-section-content { display: block; }
+        .ctx-subtabs { display: flex; gap: 2px; padding: 6px 8px; border-bottom: 1px solid var(--border); flex-wrap: wrap; background: var(--bg-input); position: sticky; top: 0; z-index: 2; }
+        .ctx-subtab { background: none; border: 0.5px solid transparent; border-radius: 6px; padding: 4px 8px; font-size: 11px; color: var(--text-secondary); cursor: pointer; font-family: inherit; transition: all 0.15s; }
+        .ctx-subtab:hover { background: var(--bg-hover); color: var(--text-primary); }
+        .ctx-subtab.active { background: var(--bg-primary); color: var(--accent); border-color: var(--border); font-weight: 600; }
+        .ctx-subview { display: none; padding: 8px; }
+        .ctx-subview.active { display: block; }
+        .context-code { background: rgba(0,0,0,0.05); border-radius: 4px; padding: 6px 8px; font-family: 'Fira Code', monospace; font-size: 11px; white-space: pre-wrap; word-break: break-word; }
+        .context-msg { padding: 5px 8px; margin-bottom: 4px; border-radius: 6px; font-size: 12px; }
+        .context-msg-role { font-weight: 600; font-size: 11px; margin-bottom: 2px; }
+        .context-msg.role-user { background: rgba(0,0,0,0.03); border-left: 2px solid #4d6bfe; }
+        .context-msg.role-assistant { background: rgba(0,0,0,0.03); border-left: 2px solid #2e9e5b; }
+        .context-msg.role-thinking { background: rgba(0,0,0,0.02); border-left: 2px solid #a070d0; font-style: italic; }
+        .context-tool-item { padding: 5px 0; border-bottom: 0.5px solid var(--border); }
+        .context-tool-item:last-child { border-bottom: none; }
+        .context-tool-name { font-weight: 600; color: var(--text-primary); font-size: 12px; }
+        .context-tool-desc { color: var(--text-secondary); font-size: 11px; margin-top: 2px; }
+        .context-empty { padding: 20px; text-align: center; color: var(--text-secondary); font-size: 13px; }
+        /* Timeline */
+        .timeline-item { display: flex; gap: 8px; padding: 8px 10px; border-bottom: 0.5px solid var(--border); font-size: 12px; cursor: pointer; }
+        .timeline-item:hover { background: var(--bg-hover); }
+        .timeline-time { color: var(--text-secondary); font-size: 10px; font-family: 'Fira Code', monospace; flex-shrink: 0; width: 64px; }
+        .timeline-icon { width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+        .timeline-icon.llm_token { color: #4d6bfe; }
+        .timeline-icon.llm_thinking { color: #a070d0; }
+        .timeline-icon.tool_start { color: var(--accent); }
+        .timeline-icon.tool_end { color: #2e9e5b; }
+        .timeline-icon.done { color: #2e9e5b; }
+        .timeline-icon.error { color: #e44; }
+        .timeline-content { flex: 1; min-width: 0; }
+        .timeline-label { font-weight: 600; color: var(--text-primary); }
+        .timeline-detail { color: var(--text-secondary); font-size: 11px; margin-top: 3px; display: none; white-space: pre-wrap; word-break: break-word; background: rgba(0,0,0,0.04); border-radius: 4px; padding: 5px 7px; }
+        .timeline-item.open .timeline-detail { display: block; }
+        .timeline-toggle { color: var(--text-secondary); font-size: 10px; flex-shrink: 0; transition: transform 0.2s; }
+        .timeline-item.open .timeline-toggle { transform: rotate(180deg); }
+        .context-open-btn { position: fixed; right: 16px; top: 70px; width: 36px; height: 36px; border-radius: 50%; background: var(--accent); color: white; border: none; cursor: pointer; display: none; align-items: center; justify-content: center; z-index: 50; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+        .context-open-btn.visible { display: flex; }
+        .context-open-btn svg { width: 18px; height: 18px; }
+        /* Loop view */
+        .loop-step { border: 0.5px solid var(--border); border-radius: 8px; margin-bottom: 8px; overflow: hidden; background: var(--bg-input); }
+        .loop-step-header { display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer; user-select: none; font-size: 12px; }
+        .loop-step-header:hover { background: var(--bg-hover); }
+        .loop-step-num { width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: white; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; flex-shrink: 0; }
+        .loop-step-node { font-weight: 600; color: var(--text-primary); }
+        .loop-step-types { color: var(--text-secondary); font-size: 11px; }
+        .loop-step-time { margin-left: auto; color: var(--text-secondary); font-size: 10px; font-family: 'Fira Code', monospace; }
+        .loop-step-toggle { color: var(--text-secondary); transition: transform 0.2s; font-size: 10px; }
+        .loop-step.open .loop-step-toggle { transform: rotate(180deg); }
+        .loop-step-body { display: none; padding: 8px 10px; border-top: 0.5px solid var(--border); font-size: 12px; color: var(--text-secondary); }
+        .loop-step.open .loop-step-body { display: block; }
+        .loop-msg-row { padding: 4px 0; border-bottom: 0.5px solid var(--border); }
+        .loop-msg-row:last-child { border-bottom: none; }
+        .loop-msg-type { font-weight: 600; font-size: 11px; }
+        .loop-msg-preview { font-size: 11px; color: var(--text-secondary); white-space: pre-wrap; word-break: break-word; max-height: 120px; overflow-y: auto; margin-top: 2px; }
+
+        /* Todo Panel (in-conversation planning display) */
+        .todo-panel { max-width: 800px; margin: 0 auto 12px; padding: 0 24px 0 70px; }
+        .todo-panel-card { background: var(--bg-input); border: 0.5px solid var(--border); border-radius: 10px; padding: 10px 14px; }
+        .todo-panel-title { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--text-primary); margin-bottom: 8px; }
+        .todo-panel-title svg { width: 14px; height: 14px; color: var(--accent); }
+        .todo-item { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; font-size: 13px; color: var(--text-primary); border-bottom: 0.5px solid var(--border); }
+        .todo-item:last-child { border-bottom: none; }
+        .todo-status { width: 16px; height: 16px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; margin-top: 1px; }
+        .todo-status.pending { color: #bbb; }
+        .todo-status.in_progress { color: var(--accent); }
+        .todo-status.completed { color: #2e9e5b; }
+        .todo-status svg { width: 14px; height: 14px; }
+        .todo-text { flex: 1; word-break: break-word; }
+        .todo-item.completed .todo-text { color: var(--text-secondary); text-decoration: line-through; }
+        .todo-item.in_progress .todo-text { font-weight: 600; }
+        .todo-badge { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 8px; margin-left: 6px; flex-shrink: 0; }
+        .todo-badge.pending { background: #eee; color: #888; }
+        .todo-badge.in_progress { background: rgba(77,107,254,0.12); color: #4d6bfe; }
+        .todo-badge.completed { background: rgba(46,158,91,0.12); color: #2e9e5b; }
+        .todo-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--accent); border-top-color: transparent; border-radius: 50%; animation: toolspin 0.8s linear infinite; }
+
+        /* Approval card (human-in-the-loop for file modification) */
+        .approval-card { max-width: 800px; margin: 0 auto 12px; padding: 0 24px 0 70px; }
+        .approval-inner { background: #fffbe6; border: 1px solid #f0d264; border-radius: 10px; padding: 12px 14px; }
+        .approval-title { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: #8a6d1a; margin-bottom: 8px; }
+        .approval-title svg { width: 15px; height: 15px; flex-shrink: 0; }
+        .approval-msg { font-size: 12px; color: #6b5b1f; background: rgba(0,0,0,0.04); border-radius: 6px; padding: 8px 10px; margin-bottom: 10px; white-space: pre-wrap; word-break: break-word; font-family: 'Fira Code', monospace; }
+        .approval-btns { display: flex; gap: 8px; }
+        .approval-btn { padding: 6px 14px; border-radius: 8px; border: none; font-size: 13px; cursor: pointer; font-family: inherit; transition: opacity 0.15s; }
+        .approval-btn.approve { background: #2e9e5b; color: white; }
+        .approval-btn.reject { background: #e44; color: white; }
+        .approval-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .approval-status { font-size: 11px; color: #8a6d1a; margin-top: 8px; display: none; }
+
+        .messages-container { flex: 1; overflow-y: auto; padding: 24px 0; }
+        .messages-container::-webkit-scrollbar { width: 6px; }
+        .messages-container::-webkit-scrollbar-thumb { background: #ddd; border-radius: 3px; }
+
+        .message-row { max-width: 800px; margin: 0 auto 20px; padding: 0 24px; display: flex; gap: 10px; }
+        .message-row.user { flex-direction: row-reverse; }
+        .avatar { width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; white-space: nowrap; }
+        .avatar.ai, .avatar.assistant { background: var(--accent); color: white; }
+        .avatar.user { background: #c5d8ff; color: #185fa5; }
+        .bubble-wrap { max-width: 70%; min-width: 0; }
+        .bubble { padding: 12px 16px; border-radius: 16px; font-size: 15px; line-height: 1.7; word-wrap: break-word; white-space: pre-line; }
+        .bubble.ai, .bubble.assistant { background: var(--bg-ai-bubble); color: var(--text-primary); border-top-left-radius: 4px; }
+        .bubble.user { background: var(--bg-user-bubble); color: var(--text-user-bubble); border-top-right-radius: 4px; }
+        .bubble p { margin-bottom: 8px; } .bubble p:last-child { margin-bottom: 0; }
+        .bubble pre { background: #1e1e2e; color: #cdd6f4; padding: 14px; border-radius: 8px; overflow-x: auto; margin: 8px 0; font-size: 13px; }
+        .bubble code { background: rgba(0,0,0,0.08); padding: 2px 6px; border-radius: 4px; font-size: 13px; font-family: 'Fira Code', monospace; }
+        .bubble.user code { background: rgba(0,0,0,0.08); }
+        .bubble pre code { background: none; padding: 0; }
+        .bubble ul, .bubble ol { padding-left: 20px; margin-bottom: 8px; }
+        .bubble li { margin-bottom: 4px; }
+        .bubble table { border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 13px; }
+        .bubble th, .bubble td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+        .bubble th { background: var(--bg-input); font-weight: 600; color: var(--text-primary); }
+        .bubble tr:nth-child(even) td { background: rgba(0,0,0,0.02); }
+
+        .tools-list { max-width: 800px; margin: 0 auto 12px; padding: 0 24px 0 70px; }
+        .tool-item { border: 0.5px solid var(--border); border-radius: 8px; margin-bottom: 6px; overflow: hidden; background: var(--bg-input); }
+        .tool-item-header { display: flex; align-items: center; gap: 8px; padding: 7px 12px; cursor: pointer; user-select: none; font-size: 12px; }
+        .tool-item-header:hover { background: var(--bg-hover); }
+        .tool-status { width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+        .tool-status.running { color: var(--accent); }
+        .tool-status.success { color: #2e9e5b; }
+        .tool-status.error { color: #e44; }
+        .tool-name { font-weight: 600; color: var(--text-primary); }
+        .tool-state-label { margin-left: auto; font-size: 11px; }
+        .tool-state-label.running { color: var(--accent); }
+        .tool-state-label.success { color: #2e9e5b; }
+        .tool-state-label.error { color: #e44; }
+        .tool-toggle { transition: transform 0.2s; color: var(--text-secondary); font-size: 10px; }
+        .tool-item.open .tool-toggle { transform: rotate(180deg); }
+        .tool-detail { display: none; padding: 8px 12px; border-top: 0.5px solid var(--border); font-size: 12px; line-height: 1.6; color: var(--text-secondary); }
+        .tool-item.open .tool-detail { display: block; }
+        .tool-detail-label { color: var(--text-muted); font-weight: 600; margin-top: 6px; }
+        .tool-detail-label:first-child { margin-top: 0; }
+        .tool-detail-code { background: rgba(0,0,0,0.05); border-radius: 4px; padding: 4px 8px; margin-top: 3px; white-space: pre-wrap; word-break: break-all; font-family: 'Fira Code', monospace; font-size: 11px; }
+        .tool-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--accent); border-top-color: transparent; border-radius: 50%; animation: toolspin 0.8s linear infinite; }
+        @keyframes toolspin { to { transform: rotate(360deg); } }
+
+        .typing-indicator { display: inline-flex; gap: 4px; align-items: center; padding: 4px 0; }
+        .typing-indicator span { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: bounce 1.4s infinite; }
+        .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+        .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); opacity: 0.5; } 30% { transform: translateY(-6px); opacity: 1; } }
+
+        .welcome-screen { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px; }
+        .welcome-logo { font-size: 36px; font-weight: 700; color: var(--accent); margin-bottom: 12px; }
+        .welcome-subtitle { font-size: 16px; color: var(--text-secondary); margin-bottom: 40px; }
+        .welcome-suggestions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 600px; width: 100%; }
+        .suggestion-card { padding: 16px 20px; border: 1px solid var(--border); border-radius: 12px; cursor: pointer; transition: all 0.2s; }
+        .suggestion-card:hover { border-color: var(--accent); background: var(--bg-ai-bubble); }
+        .suggestion-title { font-weight: 600; margin-bottom: 4px; }
+        .suggestion-desc { font-size: 13px; color: var(--text-secondary); }
+
+        .input-area { padding: 16px 24px 20px; }
+        .input-wrapper { max-width: 800px; margin: 0 auto; display: flex; flex-direction: column; gap: 4px; background: var(--bg-input); border-radius: 16px; padding: 12px 12px 8px 20px; border: 1px solid transparent; transition: border-color 0.2s; }
+        .input-wrapper:focus-within { border-color: var(--accent); }
+        .chat-input { width: 100%; border: none; background: none; outline: none; font-size: 15px; font-family: inherit; resize: none; max-height: 200px; min-height: 24px; line-height: 1.6; padding: 4px 0; }
+        .input-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .toolbar-left { display: flex; gap: 6px; }
+        .feature-toggle { display: inline-flex; align-items: center; gap: 4px; background: none; border: 0.5px solid var(--border); border-radius: 16px; padding: 4px 10px; font-size: 12px; color: var(--text-secondary); cursor: pointer; transition: all 0.2s; font-family: inherit; }
+        .feature-toggle:hover { background: var(--bg-hover); color: var(--text-primary); }
+        .feature-toggle.active { background: rgba(77, 107, 254, 0.08); border-color: var(--accent); color: var(--accent); }
+        .feature-toggle svg { width: 12px; height: 12px; }
+        .send-btn { width: 36px; height: 36px; border: none; border-radius: 50%; color: white; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: all 0.2s; }
+        .send-btn.send { background: var(--accent); }
+        .send-btn.send:hover { background: var(--accent-hover); }
+        .send-btn.stop { background: #e44; }
+        .send-btn.stop:hover { background: #c33; }
+        .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .send-btn svg { width: 18px; height: 18px; }
+
+        /* --- Message actions (Copy, Refresh, Like, Dislike) --- */
+        .msg-actions { display: flex; gap: 4px; margin-top: 6px; opacity: 0; transition: opacity 0.2s; }
+        .bubble-wrap:hover .msg-actions { opacity: 1; }
+        .msg-actions.right { justify-content: flex-end; }
+        .msg-btn { display: inline-flex; align-items: center; gap: 4px; background: none; border: none; color: var(--text-secondary); cursor: pointer; padding: 4px 6px; border-radius: 6px; font-size: 12px; transition: all 0.15s; }
+        .msg-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+        .msg-btn.active { color: var(--accent); }
+        .msg-btn svg { width: 14px; height: 14px; }
+        .msg-btn.copied { color: #1d9e75; }
+
+        /* --- Thinking display --- */
+        .thinking-block { max-width: 800px; margin: 0 auto 12px; padding: 0 24px 0 70px; }
+        .thinking-header { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 12px; cursor: pointer; user-select: none; padding: 4px 0; }
+        .thinking-header:hover { color: var(--text-primary); }
+        .thinking-icon { width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; }
+        .thinking-toggle { margin-left: auto; transition: transform 0.2s; }
+        .thinking-toggle.open { transform: rotate(180deg); }
+        .thinking-content { background: #f7f7f5; border: 0.5px solid #e5e5e0; border-radius: 8px; padding: 12px 14px; margin-top: 6px; font-size: 13px; line-height: 1.6; color: #6b6b6b; white-space: pre-wrap; max-height: 300px; overflow-y: auto; }
+        .thinking-content.collapsed { display: none; }
+
+        /* --- Session item menu button (3-dot) --- */
+        .session-item .session-menu { opacity: 0; background: none; border: none; color: var(--text-secondary); cursor: pointer; padding: 4px; border-radius: 4px; flex-shrink: 0; transition: opacity 0.15s; }
+        .session-item:hover .session-menu { opacity: 1; }
+        .session-menu:hover { background: var(--bg-hover); color: var(--text-primary); }
+        .session-pinned { color: var(--accent); }
+        .session-section-header { font-size: 11px; font-weight: 500; color: #e44; padding: 14px 14px 4px; letter-spacing: 0.3px; }
+        .session-rename-input { flex: 1; padding: 4px 8px; border: 1.5px solid var(--accent); border-radius: 4px; font-size: 14px; font-family: inherit; outline: none; background: white; }
+
+        /* --- Context menu --- */
+        .context-menu { position: fixed; background: white; border: 0.5px solid var(--border); border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); padding: 4px; z-index: 300; min-width: 140px; }
+        .context-menu-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 6px; cursor: pointer; font-size: 14px; color: var(--text-primary); background: none; border: none; width: 100%; text-align: left; }
+        .context-menu-item:hover { background: var(--bg-hover); }
+        .context-menu-item.danger { color: #e44; }
+        .context-menu-item.danger:hover { background: rgba(228,68,68,0.1); }
+        .context-menu-item svg { width: 14px; height: 14px; }
+        .context-menu-divider { height: 0.5px; background: var(--border); margin: 4px 0; }
+
+        /* --- Modals (rename, delete confirm) --- */
+        .center-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 400; display: none; align-items: center; justify-content: center; }
+        .center-modal.show { display: flex; }
+        .center-modal .modal-box { background: white; border-radius: 12px; padding: 24px; min-width: 360px; max-width: 480px; box-shadow: 0 8px 32px rgba(0,0,0,0.16); }
+        .center-modal h3 { font-size: 16px; font-weight: 500; margin-bottom: 8px; }
+        .center-modal p { color: var(--text-secondary); font-size: 14px; margin-bottom: 20px; }
+        .center-modal input { width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; outline: none; font-family: inherit; }
+        .center-modal input:focus { border-color: var(--accent); }
+        .center-modal .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+        .center-modal button { padding: 8px 16px; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; font-family: inherit; }
+        .center-modal .btn-cancel { background: transparent; color: var(--text-primary); border: 0.5px solid var(--border); }
+        .center-modal .btn-cancel:hover { background: var(--bg-hover); }
+        .center-modal .btn-confirm { background: var(--accent); color: white; }
+        .center-modal .btn-confirm:hover { background: var(--accent-hover); }
+        .center-modal .btn-danger { background: #e44; color: white; }
+        .center-modal .btn-danger:hover { background: #c33; }
+
+        @media (max-width: 768px) {
+            .sidebar { position: fixed; left: 0; top: 0; height: 100vh; z-index: 100; margin-left: 0; }
+            .sidebar.collapsed { margin-left: -280px; }
+            .menu-toggle { display: block; }
+            .welcome-suggestions { grid-template-columns: 1fr; }
+            .bubble-wrap { max-width: 85%; }
+            .thinking-block { padding-left: 24px; }
+        }
+    </style>
+</head>
+<body>
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header" style="display:flex;align-items:center;justify-content:space-between;">
+            <div class="logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                Deep Agents
+            </div>
+            <button class="sidebar-toggle-btn" onclick="toggleSidebar()" title="收缩侧边栏">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+            </button>
+        </div>
+        <div class="sidebar-content" style="flex:1;display:flex;flex-direction:column;min-height:0;">
+        <button class="new-chat-btn" onclick="createSession()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            New Chat
+        </button>
+        <div class="session-list" id="sessionList"></div>
+        <div class="sidebar-footer">
+            <span class="model-badge">deepseek-v4-flash</span>
+            <span style="font-size:11px;color:var(--text-muted); margin-left:6px">Local</span>
+        </div>
+        </div>
+        <!-- Collapsed bar (only shown when sidebar.collapsed) -->
+        <div class="sidebar-collapsed-bar">
+            <button onclick="toggleSidebar()" title="展开侧边栏">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
+        </div>
+    </aside>
+
+    <main class="chat-area">
+        <div class="chat-header">
+            <div class="chat-title" id="chatTitle">Deep Agents Chat</div>
+            <div class="run-state idle" id="runState"><span class="run-state-dot"></span><span id="runStateLabel">空闲</span></div>
+        </div>
+        <div class="messages-container" id="messagesContainer"></div>
+        <div class="input-area">
+            <div class="input-wrapper">
+                <textarea class="chat-input" id="chatInput" placeholder="Send a message..." rows="1"
+                    onkeydown="handleKeyDown(event)" oninput="autoResize(this)"></textarea>
+                <div class="input-toolbar">
+                    <div class="toolbar-left">
+                        <button class="feature-toggle" id="searchToggle" onclick="toggleSearch()" title="启用/关闭联网搜索">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                            <span>智能搜索</span>
+                        </button>
+                    </div>
+                    <button class="send-btn send" id="sendBtn" onclick="sendMessage()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <aside class="context-panel" id="contextPanel">
+        <div class="context-panel-header">
+            <div class="context-tabs">
+                <button class="context-tab active" id="ctxTabContext" onclick="switchContextTab('context')">Context</button>
+                <button class="context-tab" id="ctxTabTimeline" onclick="switchContextTab('timeline')">时间线</button>
+                <button class="context-tab" id="ctxTabLoop" onclick="switchContextTab('loop')">Loop</button>
+            </div>
+            <button class="context-close-btn" onclick="toggleContextPanel()" title="收起面板">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
+        </div>
+        <div class="context-body" id="ctxBody">
+            <div id="ctxContextView">
+                <div class="context-empty">选择一个会话后加载 Context</div>
+            </div>
+            <div id="ctxTimelineView" style="display:none">
+                <div class="context-empty">发送消息后，请求时间线会显示在这里</div>
+            </div>
+            <div id="ctxLoopView" style="display:none">
+                <div class="context-empty">Agent 运行时，每个节点的执行信息会显示在这里</div>
+            </div>
+        </div>
+    </aside>
+
+    <button class="context-open-btn" id="ctxOpenBtn" onclick="toggleContextPanel()" title="展开 Context 面板">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+    </button>
+
+    <script>
+        let currentSessionId = null;
+        let isStreaming = false;
+        let abortController = null;
+        let currentEmpty = false;  // whether the current session has no messages
+        let useSearch = false;     // 联网搜索开关（默认关闭）
+        let ctxTab = 'context';    // 右侧面板当前 Tab: 'context' | 'timeline'
+        let timelineEvents = [];   // 当前会话时间线事件累积
+
+        window.onload = function() { showWelcome(); loadSessions(); };
+
+        // --- Context Panel ---
+        function toggleContextPanel() {
+            const panel = document.getElementById('contextPanel');
+            const openBtn = document.getElementById('ctxOpenBtn');
+            panel.classList.toggle('collapsed');
+            const collapsed = panel.classList.contains('collapsed');
+            openBtn.classList.toggle('visible', collapsed);
+        }
+        function switchContextTab(tab) {
+            ctxTab = tab;
+            document.getElementById('ctxTabContext').classList.toggle('active', tab === 'context');
+            document.getElementById('ctxTabTimeline').classList.toggle('active', tab === 'timeline');
+            document.getElementById('ctxTabLoop').classList.toggle('active', tab === 'loop');
+            document.getElementById('ctxContextView').style.display = tab === 'context' ? 'block' : 'none';
+            document.getElementById('ctxTimelineView').style.display = tab === 'timeline' ? 'block' : 'none';
+            document.getElementById('ctxLoopView').style.display = tab === 'loop' ? 'block' : 'none';
+        }
+        // --- Run State Indicator ---
+        function setRunState(state, label) {
+            const el = document.getElementById('runState');
+            el.className = 'run-state ' + state;
+            document.getElementById('runStateLabel').textContent = label;
+        }
+        function updateRunState(data) {
+            const ev = data.event;
+            if (ev === 'llm_thinking') setRunState('thinking', '思考中');
+            else if (ev === 'tool_start') setRunState('tool', '调用工具');
+            else if (ev === 'tool_end') setRunState('running', '运行中');
+            else if (ev === 'llm_token') setRunState('running', '生成中');
+            else if (ev === 'done') { setRunState('done', '完成'); setTimeout(() => setRunState('idle', '空闲'), 3000); }
+            else if (ev === 'error') setRunState('error', '错误');
+            else if (ev === 'loop') setRunState('running', '运行中');
+        }
+        async function loadContext(sessionId) {
+            if (!sessionId) return;
+            const view = document.getElementById('ctxContextView');
+            view.innerHTML = '<div class="context-empty">加载中...</div>';
+            try {
+                const res = await fetch(`/api/context/${sessionId}`);
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                renderContextView(data);
+            } catch (e) {
+                view.innerHTML = '<div class="context-empty">加载失败: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+        function renderContextView(data) {
+            const view = document.getElementById('ctxContextView');
+            // 系统提示词
+            const sysContent = `<div class="context-code">${escapeHtml(data.system_prompt || '(无)')}</div>`;
+            // 对话历史
+            let msgsContent = '';
+            if (data.messages && data.messages.length) {
+                data.messages.forEach(m => {
+                    const role = m.role || 'user';
+                    const preview = (m.content || '').slice(0, 500) + ((m.content || '').length > 500 ? '...' : '');
+                    msgsContent += `<div class="context-msg role-${role}"><div class="context-msg-role">${role}</div><div>${escapeHtml(preview)}</div></div>`;
+                });
+            } else {
+                msgsContent = '<div style="padding:8px;color:var(--text-secondary)">（暂无对话历史）</div>';
+            }
+            // 工具定义
+            let toolsContent = '';
+            const allTools = [...(data.tools || []), ...(data.backend_tools || []).map(t => ({name: t, description: '(内置文件系统/Shell 工具)'}))];
+            allTools.forEach(t => {
+                toolsContent += `<div class="context-tool-item"><div class="context-tool-name">${escapeHtml(t.name)}</div><div class="context-tool-desc">${escapeHtml(t.description || '')}</div></div>`;
+            });
+            // 技能索引
+            let skillsContent = '';
+            if (data.skills && data.skills.length) {
+                data.skills.forEach(s => {
+                    skillsContent += `<div class="context-tool-item"><div class="context-tool-name">${escapeHtml(s.name)}</div><div class="context-tool-desc">${escapeHtml(s.summary || '(无摘要)')}</div></div>`;
+                });
+            } else {
+                skillsContent = '<div style="padding:8px;color:var(--text-secondary)">（暂无技能）</div>';
+            }
+            // 子 Agent
+            let subsContent = '';
+            if (data.subagents && data.subagents.length) {
+                data.subagents.forEach(s => {
+                    subsContent += `<div class="context-tool-item"><div class="context-tool-name">${escapeHtml(s.name)}</div><div class="context-tool-desc">${escapeHtml(s.description || '')}</div></div>`;
+                });
+            } else {
+                subsContent = '<div style="padding:8px;color:var(--text-secondary)">（暂无）</div>';
+            }
+            const tabs = [
+                { id: 'prompt', label: '提示词', count: 1 },
+                { id: 'history', label: '历史', count: data.messages ? data.messages.length : 0 },
+                { id: 'tools', label: '工具', count: allTools.length },
+                { id: 'skills', label: '技能', count: data.skills ? data.skills.length : 0 },
+                { id: 'subagents', label: '子Agent', count: data.subagents ? data.subagents.length : 0 },
+            ];
+            const subtabsHtml = tabs.map((t, i) =>
+                `<button class="ctx-subtab ${i === 0 ? 'active' : ''}" onclick="switchCtxSubtab('${t.id}')">${escapeHtml(t.label)} <span style="color:var(--text-secondary);font-weight:400">${t.count}</span></button>`
+            ).join('');
+            const views = [
+                { id: 'prompt', html: sysContent },
+                { id: 'history', html: msgsContent },
+                { id: 'tools', html: toolsContent },
+                { id: 'skills', html: skillsContent },
+                { id: 'subagents', html: subsContent },
+            ];
+            const viewsHtml = views.map((v, i) =>
+                `<div class="ctx-subview ${i === 0 ? 'active' : ''}" id="ctxsv-${v.id}">${v.html}</div>`
+            ).join('');
+            view.innerHTML = `<div class="ctx-subtabs">${subtabsHtml}</div>${viewsHtml}`;
+        }
+        function switchCtxSubtab(id) {
+            document.querySelectorAll('.ctx-subtab').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.ctx-subview').forEach(v => v.classList.remove('active'));
+            const btn = [...document.querySelectorAll('.ctx-subtab')].find(b => b.getAttribute('onclick') === `switchCtxSubtab('${id}')`);
+            if (btn) btn.classList.add('active');
+            const sv = document.getElementById('ctxsv-' + id);
+            if (sv) sv.classList.add('active');
+        }
+        function section(title, count, innerHtml) {
+            return `<div class="context-section open">
+                <div class="context-section-header" onclick="this.parentElement.classList.toggle('open')">
+                    <span>${escapeHtml(title)}</span>
+                    <span class="context-section-count">${count}</span>
+                    <span class="context-section-toggle">&#9662;</span>
+                </div>
+                <div class="context-section-content">${innerHtml}</div>
+            </div>`;
+        }
+
+        // --- Timeline ---
+        function addTimelineEvent(data) {
+            const ev = data.event || (data.token ? 'llm_token' : data.thinking ? 'llm_thinking' : data.status || 'info');
+            // 合并连续的 llm_token 事件以减少条目数
+            const last = timelineEvents[timelineEvents.length - 1];
+            if (last && last.event === 'llm_token' && ev === 'llm_token') {
+                last.text = (last.text || '') + (data.token || '');
+                last.count = (last.count || 1) + 1;
+                last.endTs = data.ts;
+                renderTimeline();
+                return;
+            }
+            if (last && last.event === 'llm_thinking' && ev === 'llm_thinking') {
+                last.text = (last.text || '') + (data.thinking || '');
+                last.count = (last.count || 1) + 1;
+                last.endTs = data.ts;
+                renderTimeline();
+                return;
+            }
+            const item = { event: ev, ts: data.ts, endTs: data.ts };
+            if (ev === 'llm_token') item.text = data.token || '';
+            else if (ev === 'llm_thinking') item.text = data.thinking || '';
+            else if (ev === 'tool_start') { item.name = data.name; item.args = data.args; }
+            else if (ev === 'tool_end') { item.name = data.name; item.tool_status = data.tool_status; item.result = data.result; }
+            else if (ev === 'done') { item.message_id = data.message_id; }
+            else if (ev === 'error') { item.error = data.error; }
+            if (data.node) item.node = data.node;
+            timelineEvents.push(item);
+            renderTimeline();
+        }
+        function renderTimeline() {
+            const view = document.getElementById('ctxTimelineView');
+            if (!timelineEvents.length) {
+                view.innerHTML = '<div class="context-empty">发送消息后，请求时间线会显示在这里</div>';
+                return;
+            }
+            const icons = {
+                llm_token: '&#9998;',
+                llm_thinking: '&#9881;',
+                tool_start: '&#128295;',
+                tool_end: '&#10003;',
+                done: '&#10003;',
+                error: '&#10007;',
+                info: '&#9679;',
+            };
+            const labels = {
+                llm_token: 'LLM 输出',
+                llm_thinking: 'LLM 思考',
+                tool_start: '工具调用',
+                tool_end: '工具结束',
+                done: '完成',
+                error: '错误',
+                info: '信息',
+            };
+            let html = '';
+            timelineEvents.forEach((e, i) => {
+                const time = (e.ts || '').slice(11, 19);
+                let label = labels[e.event] || e.event;
+                let detail = '';
+                if (e.event === 'llm_token') {
+                    label += ` (${e.count || 1} 段)`;
+                    detail = e.text || '';
+                } else if (e.event === 'llm_thinking') {
+                    label += ` (${e.count || 1} 段)`;
+                    detail = e.text || '';
+                } else if (e.event === 'tool_start') {
+                    label += `: ${e.name || ''}`;
+                    detail = '参数: ' + (e.args || '(无)');
+                } else if (e.event === 'tool_end') {
+                    label += `: ${e.name || ''} [${e.tool_status || 'success'}]`;
+                    detail = '结果: ' + (e.result || '(无)');
+                } else if (e.event === 'error') {
+                    detail = e.error || '';
+                }
+                html += `<div class="timeline-item" onclick="this.classList.toggle('open')">
+                    <span class="timeline-time">${time}</span>
+                    <span class="timeline-icon ${e.event}">${icons[e.event] || icons.info}</span>
+                    <div class="timeline-content">
+                        <div class="timeline-label">${escapeHtml(label)}${e.node ? ' <span style="color:var(--text-secondary);font-weight:400">[' + escapeHtml(e.node) + ']</span>' : ''}</div>
+                        ${detail ? `<div class="timeline-detail">${escapeHtml(detail)}</div>` : ''}
+                    </div>
+                    <span class="timeline-toggle">&#9662;</span>
+                </div>`;
+            });
+            view.innerHTML = html;
+        }
+
+        // --- Agent Loop ---
+        let loopSteps = [];
+        function addLoopEvent(data) {
+            const step = {
+                ts: data.ts,
+                node: data.node || '?',
+                msg_types: data.msg_types || [],
+                msg_count: data.msg_count || 0,
+                msgs: data.msgs || [],
+            };
+            loopSteps.push(step);
+            renderLoop();
+        }
+        function renderLoop() {
+            const view = document.getElementById('ctxLoopView');
+            if (!loopSteps.length) {
+                view.innerHTML = '<div class="context-empty">Agent 运行时，每个节点的执行信息会显示在这里</div>';
+                return;
+            }
+            let html = '';
+            loopSteps.forEach((s, i) => {
+                const time = (s.ts || '').slice(11, 19);
+                const typesStr = s.msg_types.join(', ') || '(无消息)';
+                let bodyHtml = '';
+                if (s.msgs && s.msgs.length) {
+                    s.msgs.forEach(m => {
+                        const preview = (m.preview || '').slice(0, 300);
+                        bodyHtml += `<div class="loop-msg-row"><span class="loop-msg-type">${escapeHtml(m.type)}</span><div class="loop-msg-preview">${escapeHtml(preview)}</div></div>`;
+                    });
+                } else {
+                    bodyHtml = '<div style="padding:4px;color:var(--text-secondary)">消息数: ' + s.msg_count + '</div>';
+                }
+                html += `<div class="loop-step" onclick="this.classList.toggle('open')">
+                    <div class="loop-step-header">
+                        <span class="loop-step-num">${i + 1}</span>
+                        <span class="loop-step-node">${escapeHtml(s.node)}</span>
+                        <span class="loop-step-types">${escapeHtml(typesStr)}</span>
+                        <span class="loop-step-time">${time}</span>
+                        <span class="loop-step-toggle">&#9662;</span>
+                    </div>
+                    <div class="loop-step-body">${bodyHtml}</div>
+                </div>`;
+            });
+            view.innerHTML = html;
+        }
+
+        // --- Todo Panel (pure HTML generator) ---
+        function todoPanelHtml(todoMap) {
+            const statusIcon = (status) => {
+                if (status === 'completed') return '<svg viewBox="0 0 24 24" fill="none" stroke="#2e9e5b" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>';
+                if (status === 'in_progress') return '<span class="todo-spinner"></span>';
+                return '<svg viewBox="0 0 24 24" fill="none" stroke="#bbb" stroke-width="2"><circle cx="12" cy="12" r="9"/></svg>';
+            };
+            const statusLabel = { pending: '待办', in_progress: '进行中', completed: '已完成' };
+            let items = '';
+            todoMap.forEach((status, content) => {
+                const cls = status === 'completed' ? 'completed' : status === 'in_progress' ? 'in_progress' : '';
+                items += `<div class="todo-item ${cls}">
+                    <span class="todo-status ${status}">${statusIcon(status)}</span>
+                    <span class="todo-text">${escapeHtml(content)}</span>
+                    <span class="todo-badge ${status}">${statusLabel[status] || status}</span>
+                </div>`;
+            });
+            const done = [...todoMap.values()].filter(s => s === 'completed').length;
+            const total = todoMap.size;
+            return `<div class="todo-panel-card">
+                <div class="todo-panel-title">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="3"/><polyline points="9 12 11 14 15 10"/></svg>
+                    <span>任务计划</span>
+                    <span style="margin-left:auto;font-weight:400;color:var(--text-secondary);font-size:11px">${done}/${total} 已完成</span>
+                </div>
+                ${items}
+            </div>`;
+        }
+
+        // --- Approval Card (human-in-the-loop for file modification) ---
+        function showApprovalCard(data, aiRow) {
+            const requests = data.requests || [];
+            let reqInfo = '';
+            requests.forEach(r => {
+                reqInfo += `工具: ${r.name || '?'}\n参数: ${JSON.stringify(r.args || {}, null, 2)}\n\n`;
+            });
+            reqInfo = reqInfo.trim();
+            const card = document.createElement('div');
+            card.className = 'approval-card';
+            card.innerHTML = `
+                <div class="approval-inner">
+                    <div class="approval-title">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4m0 4h.01"/><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+                        <span>需要审批 — Agent 请求修改文件</span>
+                    </div>
+                    <div class="approval-msg">${escapeHtml(reqInfo)}</div>
+                    <div class="approval-btns">
+                        <button class="approval-btn approve" onclick="approveAction(this, true)">确认修改</button>
+                        <button class="approval-btn reject" onclick="approveAction(this, false)">拒绝</button>
+                    </div>
+                    <div class="approval-status" id="approvalStatus">已提交，等待继续执行...</div>
+                </div>`;
+            aiRow.parentNode.insertBefore(card, aiRow);
+            scrollToBottom();
+        }
+        async function approveAction(btn, approved) {
+            if (!currentSessionId) return;
+            const inner = btn.closest('.approval-inner');
+            inner.querySelectorAll('.approval-btn').forEach(b => b.disabled = true);
+            try {
+                const res = await fetch(`/api/chat/${encodeURIComponent(currentSessionId)}/approve`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({approved: approved, session_id: currentSessionId}),
+                });
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const st = inner.querySelector('#approvalStatus');
+                st.style.display = 'block';
+                st.textContent = approved ? '✅ 已确认，Agent 继续执行修改...' : '🚫 已拒绝，Agent 将跳过该操作...';
+            } catch (e) {
+                console.error('approve failed:', e);
+                const st = inner.querySelector('#approvalStatus');
+                st.style.display = 'block';
+                st.textContent = '提交失败: ' + e.message;
+            }
+        }
+
+        async function loadSessions() {
+            const res = await fetch('/api/sessions');
+            const sessions = await res.json();
+            const list = document.getElementById('sessionList');
+            list.innerHTML = '';
+
+            // Group sessions by category
+            const now = new Date();
+            const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            const sevenDaysAgo = new Date(todayStart.getTime() - 7 * 86400000);
+            const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+            const currentDay = now.getDate();
+
+            const pinnedList = [];
+            const todayList = [];
+            const sevenDayList = [];
+            const thirtyDayList = [];
+            const olderMap = {};
+
+            for (const s of sessions) {
+                const d = new Date(s.updated_at);
+                if (s.pinned) { pinnedList.push(s); continue; }
+                if (d >= todayStart) { todayList.push(s); continue; }
+                if (d >= sevenDaysAgo) { sevenDayList.push(s); continue; }
+                if (d >= monthStart) { thirtyDayList.push(s); continue; }
+                const key = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+                if (!olderMap[key]) olderMap[key] = { date: d, sessions: [] };
+                olderMap[key].sessions.push(s);
+            }
+
+            const makeItem = (s) => {
+                const item = document.createElement('div');
+                item.className = 'session-item' + (s.id === currentSessionId ? ' active' : '');
+                item.dataset.id = s.id;
+                item.dataset.title = s.title;
+                item.dataset.pinned = s.pinned ? '1' : '0';
+                const pinIcon = s.pinned ? '&#9733;' : '&#8943;';
+                item.innerHTML = `
+                    <span class="session-title" data-raw="${escapeAttr(s.title)}">${escapeHtml(s.title)}${s.pinned ? ' <span class="session-pinned" title="Pinned">&#9733;</span>' : ''}</span>
+                    <button class="session-menu" onclick="showContextMenu(event, '${s.id}', '${escapeAttr(s.title)}', ${!!s.pinned})" title="More">${pinIcon}</button>`;
+                item.oncontextmenu = (e) => { e.preventDefault(); showContextMenu(e, s.id, s.title, s.pinned); };
+                item.onclick = (e) => { if (!e.target.closest('.session-menu, .session-rename-input')) selectSession(s.id); };
+                return item;
+            };
+
+            const makeSection = (title, ss) => {
+                if (!ss.length) return;
+                const h = document.createElement('div');
+                h.className = 'session-section-header';
+                h.textContent = title;
+                list.appendChild(h);
+                for (const s of ss) list.appendChild(makeItem(s));
+            };
+
+            makeSection('置顶', pinnedList);
+            makeSection('今天', todayList);
+            makeSection('7 天内', sevenDayList);
+            if (currentDay >= 7) makeSection('30 天内', thirtyDayList);
+
+            // Older year-month groups, max 12 months, descending
+            const monthKeys = Object.keys(olderMap).sort().reverse().slice(0, 12);
+            for (const k of monthKeys) {
+                const d = olderMap[k].date;
+                const label = d.getFullYear() + '年' + (d.getMonth() + 1) + '月';
+                makeSection(label, olderMap[k].sessions);
+            }
+        }
+
+        // Show context menu (right-click or 3-dot click) on session item
+        function showContextMenu(event, id, title, pinned) {
+            event.stopPropagation();
+            event.preventDefault();
+            // Remove any existing menu
+            const existing = document.getElementById('contextMenu');
+            if (existing) existing.remove();
+
+            const menu = document.createElement('div');
+            menu.id = 'contextMenu';
+            menu.className = 'context-menu';
+            menu.style.left = event.clientX + 'px';
+            menu.style.top = event.clientY + 'px';
+            const pinLabel = pinned ? '取消置顶' : '置顶';
+            menu.innerHTML = `
+                <button class="context-menu-item" onclick="renameSession('${id}')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 113 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                    重命名
+                </button>
+                <button class="context-menu-item" onclick="pinSession('${id}', ${!pinned})">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                    ${pinLabel}
+                </button>
+                <div class="context-menu-divider"></div>
+                <button class="context-menu-item danger" onclick="showDeleteConfirm('${id}', '${escapeAttr(title)}')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                    删除
+                </button>`;
+            document.body.appendChild(menu);
+
+            // Close on click outside
+            setTimeout(() => {
+                const close = (e) => {
+                    if (!menu.contains(e.target)) {
+                        menu.remove();
+                        document.removeEventListener('click', close);
+                    }
+                };
+                document.addEventListener('click', close);
+            }, 0);
+        }
+
+        async function renameSession(id) {
+            const item = document.querySelector(`.session-item[data-id="${id}"]`);
+            if (!item) return;
+            const titleSpan = item.querySelector('.session-title');
+            const currentTitle = item.dataset.title;
+            // Replace span with input
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'session-rename-input';
+            input.value = currentTitle;
+            titleSpan.replaceWith(input);
+            input.focus();
+            input.select();
+
+            // Close any context menu
+            document.querySelectorAll('.context-menu').forEach(m => m.remove());
+
+            let done = false;
+            const finish = async (save) => {
+                if (done) return;
+                done = true;
+                const newTitle = input.value.trim();
+                if (save && newTitle && newTitle !== currentTitle) {
+                    await fetch(`/api/sessions/${id}`, { method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title: newTitle}) });
+                    if (currentSessionId === id) document.getElementById('chatTitle').textContent = newTitle;
+                }
+                await loadSessions();
+            };
+
+            input.addEventListener('blur', () => finish(true));
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+                if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+            });
+        }
+
+        async function pinSession(id, newPinned) {
+            await fetch(`/api/sessions/${id}/pin`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({pinned: newPinned}) });
+            // Close any open context menu
+            document.querySelectorAll('.context-menu').forEach(m => m.remove());
+            await loadSessions();
+        }
+
+        function showDeleteConfirm(id, title) {
+            const modal = document.getElementById('deleteModal');
+            document.getElementById('deleteModalTitle').textContent = title;
+            modal.dataset.targetId = id;
+            modal.classList.add('show');
+        }
+
+        function closeDeleteConfirm() {
+            document.getElementById('deleteModal').classList.remove('show');
+        }
+
+        async function confirmDeleteSession() {
+            const id = document.getElementById('deleteModal').dataset.targetId;
+            if (!id) return;
+            await fetch(`/api/sessions/${id}`, {method: 'DELETE'});
+            if (currentSessionId === id) {
+                currentSessionId = null;
+                currentEmpty = true;
+                document.getElementById('chatTitle').textContent = 'Deep Agents Chat';
+                document.getElementById('messagesContainer').innerHTML = '';
+                showWelcome();
+            }
+            closeDeleteConfirm();
+            await loadSessions();
+        }
+
+        async function createSession(forceNew = false) {
+            // Empty session protection: if current session has no messages and not forced, just focus the input
+            if (!forceNew && currentSessionId && currentEmpty) {
+                document.getElementById('chatInput').focus();
+                return;
+            }
+            const res = await fetch('/api/sessions', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title: 'New Chat'}) });
+            const session = await res.json();
+            currentSessionId = session.id;
+            currentEmpty = true;
+            document.getElementById('chatTitle').textContent = session.title;
+            showWelcome();
+            await loadSessions();
+            document.getElementById('chatInput').focus();
+        }
+
+
+        async function selectSession(id) {
+            currentSessionId = id;
+            const container = document.getElementById('messagesContainer');
+            container.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-secondary)">Loading...</div>';
+            try {
+                const [msgRes, sessRes, fbRes] = await Promise.all([
+                    fetch(`/api/sessions/${id}/messages`),
+                    fetch('/api/sessions'),
+                    fetch(`/api/feedback/${id}`),
+                ]);
+                const messages = await msgRes.json();
+                currentEmpty = messages.length === 0;
+                const sessions = await sessRes.json();
+                let feedbackList = [];
+                try { feedbackList = await fbRes.json(); } catch(e) {}
+                const fbMap = {};
+                feedbackList.forEach(f => fbMap[f.message_id] = f.rating);
+                const session = sessions.find(s => s.id === id);
+                document.getElementById('chatTitle').textContent = session ? session.title : 'Chat';
+                container.innerHTML = '';
+                timelineEvents = [];
+                loopSteps = [];
+                renderTimeline();
+                renderLoop();
+                setRunState('idle', '空闲');
+                loadContext(id);
+                if (messages.length === 0) showWelcome();
+                else {
+                    messages.forEach(m => {
+                        if (m.role === 'thinking') {
+                            const tb = document.createElement('div');
+                            tb.className = 'thinking-block';
+                            tb.innerHTML = `
+                                <div class="thinking-header" onclick="this.parentElement.querySelector('.thinking-content').classList.toggle('collapsed'); this.querySelector('.thinking-toggle').classList.toggle('open');">
+                                    <span class="thinking-icon">&#9776;</span>
+                                    <span>Thinking</span>
+                                    <span class="thinking-toggle">&#9662;</span>
+                                </div>
+                                <div class="thinking-content collapsed">${escapeHtml(m.content)}</div>`;
+                            container.appendChild(tb);
+                            return;
+                        }
+                        const obj = appendMessage(m.role, m.content, m.id);
+                        if (m.role === 'assistant') {
+                            const rating = fbMap[m.id];
+                            if (rating === 'like') obj.actions.querySelector('.like-btn')?.classList.add('active');
+                            if (rating === 'dislike') obj.actions.querySelector('.dislike-btn')?.classList.add('active');
+                        }
+                    });
+                }
+                await loadSessions();
+                scrollToBottom();
+            } catch (err) {
+                container.innerHTML = '<div style="text-align:center;padding:40px;color:#e44">Error loading: ' + escapeHtml(err.message) + '</div>';
+                console.error('selectSession error:', err);
+            }
+        }
+
+        function handleKeyDown(event) {
+            if (event.key === 'Enter') {
+                if (event.altKey || event.shiftKey) {
+                    // Alt+Enter or Shift+Enter: insert newline
+                    return;
+                }
+                event.preventDefault();
+                sendMessage();
+            }
+        }
+        function autoResize(textarea) { textarea.style.height = 'auto'; textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px'; }
+
+        function stopGeneration() {
+            if (abortController) {
+                abortController.abort();
+                abortController = null;
+            }
+        }
+
+        function toggleSearch() {
+            useSearch = !useSearch;
+            const btn = document.getElementById('searchToggle');
+            btn.classList.toggle('active', useSearch);
+        }
+
+        function setButtonMode(mode) {
+            const btn = document.getElementById('sendBtn');
+            btn.className = 'send-btn ' + mode;
+            if (mode === 'send') {
+                btn.disabled = isStreaming;
+                btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>';
+                btn.onclick = sendMessage;
+            } else {
+                btn.disabled = false;
+                btn.innerHTML = '<svg viewBox="0 0 24 24" fill="white" stroke="white" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+                btn.onclick = stopGeneration;
+            }
+        }
+
+        async function sendMessage() {
+            const input = document.getElementById('chatInput');
+            const content = input.value.trim();
+            if (!content || isStreaming) return;
+            if (!currentSessionId) await createSession();
+            const welcome = document.getElementById('welcomeScreen');
+            if (welcome) welcome.remove();
+            currentEmpty = false;
+
+            appendMessage('user', content);
+            input.value = ''; autoResize(input);
+
+            const aiObj = appendMessage('assistant', '');
+            const aiRow = aiObj.row;
+            const aiActions = aiObj.actions;
+            const bubble = aiRow.querySelector('.bubble');
+            bubble.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
+
+            isStreaming = true;
+            setButtonMode('stop');
+            let toolsList = null;
+            const toolItems = {};
+            let toolSeq = 0;
+            let todoPanel = null;
+            const todoMap = new Map();  // content -> status (dedup, one row per task)
+            let thinkingBlock = null;
+            let thinkingContent = null;
+            abortController = new AbortController();
+            const signal = abortController.signal;
+
+            try {
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({session_id: currentSessionId, content, use_search: useSearch}),
+                    signal: signal,
+                });
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '', fullText = '';
+                bubble.innerHTML = '';
+
+                while (true) {
+                    const {done, value} = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value);
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop();
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            const data = JSON.parse(line.slice(6));
+                            addTimelineEvent(data);
+                            if (data.event === 'loop') addLoopEvent(data);
+                            updateRunState(data);
+                            if (data.event === 'approval_request') { showApprovalCard(data, aiRow); }
+                            if (data.event === 'todo') {
+                                (data.todos || []).forEach(t => {
+                                    const c = (t.content || '').trim();
+                                    if (c) todoMap.set(c, t.status || 'pending');
+                                });
+                                if (!todoPanel) {
+                                    todoPanel = document.createElement('div');
+                                    todoPanel.className = 'todo-panel';
+                                    aiRow.parentNode.insertBefore(todoPanel, aiRow);
+                                }
+                                todoPanel.innerHTML = todoPanelHtml(todoMap);
+                                scrollToBottom();
+                            }
+                            if (data.token) { fullText += data.token; bubble.innerHTML = renderMarkdown(fullText); scrollToBottom(); }
+                            if (data.thinking) {
+                                if (!thinkingBlock) {
+                                    thinkingBlock = document.createElement('div');
+                                    thinkingBlock.className = 'thinking-block';
+                                    thinkingBlock.innerHTML = `
+                                        <div class="thinking-header" onclick="this.parentElement.querySelector('.thinking-content').classList.toggle('collapsed'); this.querySelector('.thinking-toggle').classList.toggle('open');">
+                                            <span class="thinking-icon">&#9776;</span>
+                                            <span>Thinking</span>
+                                            <span class="thinking-toggle">&#9662;</span>
+                                        </div>
+                                        <div class="thinking-content"></div>`;
+                                    aiRow.parentNode.insertBefore(thinkingBlock, aiRow);
+                                    thinkingContent = thinkingBlock.querySelector('.thinking-content');
+                                }
+                                thinkingContent.textContent += data.thinking;
+                                scrollToBottom();
+                            }
+                            if (data.error) { bubble.innerHTML = '<span style="color:#e44">Error: ' + escapeHtml(data.error) + '</span>'; }
+                            if (data.status === 'tool_start') {
+                                if (!toolsList) {
+                                    toolsList = document.createElement('div');
+                                    toolsList.className = 'tools-list';
+                                    aiRow.parentNode.insertBefore(toolsList, aiRow);
+                                }
+                                const key = 'tool_' + (toolSeq++);
+                                const item = document.createElement('div');
+                                item.className = 'tool-item';
+                                item.dataset.state = 'running';
+                                item.innerHTML = `
+                                    <div class="tool-item-header" onclick="this.parentElement.classList.toggle('open')" title="点击展开详情">
+                                        <span class="tool-status running"><span class="tool-spinner"></span></span>
+                                        <span class="tool-name">${escapeHtml(data.name || 'tool')}</span>
+                                        <span class="tool-state-label running">执行中...</span>
+                                        <span class="tool-toggle">&#9662;</span>
+                                    </div>
+                                    <div class="tool-detail">
+                                        <div class="tool-detail-label">参数</div>
+                                        <div class="tool-detail-code">${escapeHtml(data.args || '(无)')}</div>
+                                    </div>`;
+                                toolsList.appendChild(item);
+                                toolItems[key] = { item: item, name: data.name || 'tool' };
+                                scrollToBottom();
+                            }
+                            if (data.status === 'tool_end') {
+                                // Find the last running item with the matching tool name
+                                let target = null;
+                                for (const k in toolItems) {
+                                    if (toolItems[k].name === (data.name || 'tool') && toolItems[k].item.dataset.state === 'running') target = toolItems[k];
+                                }
+                                if (target) {
+                                    const ok = (data.tool_status || 'success') === 'success';
+                                    target.item.dataset.state = ok ? 'success' : 'error';
+                                    const st = target.item.querySelector('.tool-status');
+                                    st.className = 'tool-status ' + (ok ? 'success' : 'error');
+                                    st.innerHTML = ok
+                                        ? '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#2e9e5b" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>'
+                                        : '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#e44" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+                                    const lbl = target.item.querySelector('.tool-state-label');
+                                    lbl.textContent = ok ? '成功' : '失败';
+                                    lbl.className = 'tool-state-label ' + (ok ? 'success' : 'error');
+                                    const detail = target.item.querySelector('.tool-detail');
+                                    const resDiv = document.createElement('div');
+                                    resDiv.innerHTML = `<div class="tool-detail-label">结果</div><div class="tool-detail-code">${escapeHtml(data.result || '(无)')}</div>`;
+                                    detail.appendChild(resDiv);
+                                    scrollToBottom();
+                                }
+                            }
+                            if (data.done && data.message_id) {
+                                // Update like/dislike buttons with real message id
+                                aiActions.querySelectorAll('.like-btn, .dislike-btn').forEach(btn => {
+                                    btn.dataset.mid = data.message_id;
+                                });
+                            }
+                        }
+                    }
+                }
+            } catch (err) {
+                if (err.name === 'AbortError') {
+                    bubble.innerHTML = '<em style="color:var(--text-secondary)">Generation stopped</em>';
+                } else {
+                    bubble.innerHTML = '<span style="color:#e44">Error: ' + escapeHtml(err.message) + '</span>';
+                }
+            }
+            isStreaming = false;
+            abortController = null;
+            setButtonMode('send');
+            await loadSessions();
+        }
+
+        function useSuggestion(text) { const input = document.getElementById('chatInput'); input.value = text; input.focus(); autoResize(input); }
+        function toggleSidebar() {
+            document.getElementById('sidebar').classList.toggle('collapsed');
+        }
+
+        function showWelcome() {
+            document.getElementById('messagesContainer').innerHTML = `
+                <div class="welcome-screen" id="welcomeScreen">
+                    <div class="welcome-logo">Deep Agents</div>
+                    <div class="welcome-suggestions">
+                        <div class="suggestion-card" onclick="useSuggestion('List files in the project, then summarize the structure')">
+                            <div class="suggestion-title">Explore Project</div>
+                            <div class="suggestion-desc">List and analyze files via shell</div>
+                        </div>
+                        <div class="suggestion-card" onclick="useSuggestion('Run git status and show me the current branch')">
+                            <div class="suggestion-title">Git Status</div>
+                            <div class="suggestion-desc">Run git commands via execute</div>
+                        </div>
+                        <div class="suggestion-card" onclick="useSuggestion('My name is GJan, please remember me in AGENTS.md')">
+                            <div class="suggestion-title">Tell Your Name</div>
+                            <div class="suggestion-desc">Framework will remember via AGENTS.md</div>
+                        </div>
+                        <div class="suggestion-card" onclick="useSuggestion('Create a Python script that prints Hello World and run it')">
+                            <div class="suggestion-title">Write + Run Code</div>
+                            <div class="suggestion-desc">Create file, execute it, check output</div>
+                        </div>
+                    </div>
+                </div>`;
+        }
+
+        function appendMessage(role, content, msgId = null) {
+            const container = document.getElementById('messagesContainer');
+            const isUser = role === 'user';
+            const row = document.createElement('div');
+            row.className = 'message-row ' + role;
+            const mid = msgId || ('temp_' + Date.now() + '_' + Math.random().toString(36).slice(2,8));
+            row.innerHTML = `
+                <div class="avatar ${role}">${isUser ? 'You' : '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>'}</div>
+                <div class="bubble-wrap">
+                    <div class="bubble ${role}">${content ? renderMarkdown(content) : ''}</div>
+                    <div class="msg-actions ${isUser ? 'right' : ''}"></div>
+                </div>`;
+            container.appendChild(row);
+            const actions = row.querySelector('.msg-actions');
+
+            if (isUser) {
+                actions.innerHTML = `
+                    <button class="msg-btn" onclick="copyMessage(this, event)" title="Copy">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                    </button>`;
+            } else {
+                actions.innerHTML = `
+                    <button class="msg-btn" onclick="copyMessage(this, event)" title="Copy">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 012-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                    </button>
+                    <button class="msg-btn" onclick="regenerateMessage(this, event)" title="Regenerate">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
+                    </button>
+                    <button class="msg-btn like-btn" data-mid="${mid}" onclick="rateMessage(this, 'like', event)" title="Like">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 9V5a3 3 0 00-3-3l-4 9v11h11.28a2 2 0 002-1.7l1.38-9a2 2 0 00-2-2.3zM7 22H4a2 2 0 01-2-2v-7a2 2 0 012-2h3"/></svg>
+                    </button>
+                    <button class="msg-btn dislike-btn" data-mid="${mid}" onclick="rateMessage(this, 'dislike', event)" title="Dislike">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 15v4a3 3 0 003 3l4-9V2H5.72a2 2 0 00-2 1.7l-1.38 9a2 2 0 002 2.3zm7-13h2.67A2.31 2.31 0 0122 4v7a2.31 2.31 0 01-2.33 2H17"/></svg>
+                    </button>`;
+            }
+            scrollToBottom();
+            return { row, actions };
+        }
+
+        function getBubbleText(row) {
+            const bubble = row.querySelector('.bubble');
+            return bubble ? bubble.innerText : '';
+        }
+
+        async function copyMessage(btn, event) {
+            event.stopPropagation();
+            const row = btn.closest('.message-row');
+            // Use innerText which gives the rendered plain text from HTML
+            const text = getBubbleText(row);
+            try {
+                await navigator.clipboard.writeText(text);
+                btn.classList.add('copied');
+                setTimeout(() => btn.classList.remove('copied'), 1500);
+            } catch (e) {
+                // Fallback for non-HTTPS or unsupported environments
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.select();
+                try {
+                    document.execCommand('copy');
+                    btn.classList.add('copied');
+                    setTimeout(() => btn.classList.remove('copied'), 1500);
+                } catch (e2) {
+                    alert('Copy failed: ' + e2.message);
+                }
+                document.body.removeChild(ta);
+            }
+        }
+
+        async function rateMessage(btn, rating, event) {
+            event.stopPropagation();
+            const actions = btn.closest('.msg-actions');
+            const mid = btn.dataset.mid;
+            if (!mid || mid.startsWith('temp_')) {
+                alert('Cannot rate: message not yet saved');
+                return;
+            }
+            const likeBtn = actions.querySelector('.like-btn');
+            const dislikeBtn = actions.querySelector('.dislike-btn');
+            const wasActive = btn.classList.contains('active');
+            // Toggle off if clicking same button
+            const newRating = wasActive ? null : rating;
+            try {
+                if (newRating) {
+                    await fetch('/api/feedback', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message_id: mid, session_id: currentSessionId, rating: newRating}) });
+                } else {
+                    // Delete existing feedback (use the rating route)
+                    await fetch(`/api/feedback/${mid}`, { method: 'DELETE' });
+                }
+                likeBtn.classList.toggle('active', newRating === 'like');
+                dislikeBtn.classList.toggle('active', newRating === 'dislike');
+            } catch (e) {
+                alert('Failed to record feedback');
+            }
+        }
+
+        async function regenerateMessage(btn, event) {
+            event.stopPropagation();
+            // Get the user message before this AI message
+            const actions = btn.closest('.msg-actions');
+            const aiRow = actions.previousElementSibling;
+            // Find the previous user message
+            let prev = aiRow ? aiRow.previousElementSibling : null;
+            while (prev && !prev.classList.contains('user')) prev = prev.previousElementSibling;
+            if (!prev) { alert('No previous user message to regenerate from'); return; }
+            const userText = getBubbleText(prev);
+            // Remove the AI response
+            aiRow.remove();
+            actions.remove();
+            // Re-send
+            document.getElementById('chatInput').value = userText;
+            await sendMessage();
+        }
+
+        function scrollToBottom() { const c = document.getElementById('messagesContainer'); c.scrollTop = c.scrollHeight; }
+
+        function renderMarkdown(text) {
+            let html = escapeHtml(text);
+            // Code blocks first (before any other replacements)
+            html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (m, lang, code) => '<pre><code>' + code.trim() + '</code></pre>');
+            html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+            // Tables: consecutive lines starting with |
+            html = html.replace(/((^|\n)(\|[^\n]*\|\s*(\n|$))+)/g, (m) => {
+                const lines = m.split('\n').filter(l => l.trim().startsWith('|'));
+                if (lines.length < 2) return m;
+                let out = '<table>';
+                lines.forEach((line, idx) => {
+                    const cells = line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+                    if (idx === 1 && cells.every(c => /^:?-{3,}:?$/.test(c))) return; // separator row
+                    const tag = idx === 0 ? 'th' : 'td';
+                    out += '<tr>' + cells.map(c => `<${tag}>${c}</${tag}>`).join('') + '</tr>';
+                });
+                out += '</table>';
+                return out;
+            });
+            // Bold: only if **...** pair is balanced and has content
+            html = html.replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>');
+            // Italic: only if *...* pair is balanced
+            html = html.replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, '$1<em>$2</em>');
+            // Escape leftover stray asterisks that didn't form a pair
+            html = html.replace(/\*+/g, '');
+            // Headings
+            html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+            html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+            html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+            // Lists: consecutive list lines (blank lines between items allowed)
+            html = html.replace(/((?:^|\n)[ \t]*(?:[-*]|\d+\.)[ \t]+[^\n]*(?:\n[ \t]*(?:\n[ \t]*)?(?:[-*]|\d+\.)[ \t]+[^\n]*)*)/g, (m) => {
+                const lines = m.split('\n').map(l => l.trim()).filter(l => /^(?:[-*]|\d+\.)[ \t]+/.test(l));
+                const items = lines.map(l => '<li>' + l.replace(/^(?:[-*]|\d+\.)[ \t]+/, '') + '</li>').join('');
+                // Keep the leading newline so the paragraph before the list
+                // stays separated (blank line still triggers </p><p>).
+                return (m.startsWith('\n') ? '\n' : '') + '<ul>' + items + '</ul>';
+            });
+            // Paragraphs (blank-line separated) — single newlines are preserved
+            // and displayed via `white-space: pre-line` on .bubble.
+            html = html.replace(/\n{2,}/g, '</p><p>');
+            html = '<p>' + html + '</p>';
+            html = html.replace(/<p>\s*<\/p>/g, '');
+            html = html.replace(/<p>\s*(<(?:pre|h[1-3]|ul|li|table))/g, '$1');
+            html = html.replace(/(<\/(?:pre|h[1-3]|ul|table)>)\s*<\/p>/g, '$1');
+            return html;
+        }
+
+        function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
+        function escapeAttr(text) { return String(text).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+    </script>
+    <!-- Delete confirmation modal -->
+    <div class="center-modal" id="deleteModal">
+        <div class="modal-box">
+            <h3 id="deleteModalTitle">删除后，该对话将不可恢复</h3>
+            <p>删除后不可恢复，确认删除此会话吗？</p>
+            <div class="modal-actions">
+                <button class="btn-cancel" onclick="closeDeleteConfirm()">取消</button>
+                <button class="btn-danger" onclick="confirmDeleteSession()">删除该对话</button>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
