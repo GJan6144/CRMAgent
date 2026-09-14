@@ -1,0 +1,191 @@
+@import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap");
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+body {
+  font-family: var(--font-sans);
+}
+
+/* ==========================================================
+   Markdown 渲染样式（对话消息内容）
+   与 CRM 整体视觉保持一致：中性灰蓝 + 圆角 + 细边框
+   ========================================================== */
+
+.md-body {
+  font-size: 13.5px;
+  line-height: 1.72;
+  color: #1e293b;
+  word-break: break-word;
+}
+
+.md-body > *:first-child {
+  margin-top: 0;
+}
+.md-body > *:last-child {
+  margin-bottom: 0;
+}
+
+.md-p {
+  margin: 0 0 10px;
+  white-space: pre-wrap;
+}
+
+.md-h {
+  font-weight: 700;
+  color: #0f172a;
+  line-height: 1.4;
+  margin: 18px 0 8px;
+  letter-spacing: -0.01em;
+}
+
+.md-hr {
+  border: none;
+  border-top: 1px solid #e2e8f0;
+  margin: 16px 0;
+}
+
+.md-inline-code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  background: #f1f5f9;
+  color: #be123c;
+  padding: 1.5px 5px;
+  border-radius: 5px;
+  word-break: break-all;
+}
+
+.md-pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 10px;
+  padding: 13px 15px;
+  margin: 10px 0;
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.md-pre code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  white-space: pre;
+}
+
+.md-list {
+  margin: 6px 0 10px;
+  padding-left: 22px;
+}
+
+/* Tailwind preflight 会把 list-style 重置为 none，此处显式恢复标记符号 */
+ul.md-list {
+  list-style: disc outside;
+}
+
+ol.md-list {
+  list-style: decimal outside;
+}
+
+ul.md-list ul {
+  list-style: circle outside;
+}
+
+ul.md-list ul ul {
+  list-style: square outside;
+}
+
+.md-list li {
+  margin: 3px 0;
+}
+
+.md-list li::marker {
+  color: #94a3b8;
+}
+
+.md-list ul,
+.md-list ol {
+  margin: 3px 0;
+}
+
+.md-quote {
+  margin: 10px 0;
+  padding: 8px 14px;
+  border-left: 3px solid #93c5fd;
+  background: #f8fafc;
+  border-radius: 0 8px 8px 0;
+  color: #475569;
+}
+
+.md-table-wrap {
+  overflow-x: auto;
+  margin: 12px 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+}
+
+.md-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12.5px;
+}
+
+.md-table th {
+  background: #f8fafc;
+  font-weight: 600;
+  color: #334155;
+  text-align: left;
+}
+
+.md-table th,
+.md-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid #eef2f7;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.md-table tr:last-child td {
+  border-bottom: none;
+}
+
+.md-table td {
+  color: #334155;
+}
+
+.md-body a {
+  color: #2563eb;
+  text-decoration: none;
+  border-bottom: 1px solid rgba(37, 99, 235, 0.3);
+  word-break: break-all;
+}
+
+.md-body a:hover {
+  border-bottom-color: #2563eb;
+}
+
+.md-body strong {
+  font-weight: 700;
+  color: #0f172a;
+}
+
+/* ==========================================================
+   AI 助手对话页动画
+   ========================================================== */
+
+@keyframes chatPulse {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.chat-dot {
+  animation: chatPulse 1.2s ease-in-out infinite;
+}
+
+
+
