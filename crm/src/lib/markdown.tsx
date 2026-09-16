@@ -1,4 +1,6 @@
 import React from "react";
+import DataCard from "@/components/DataCard";
+import type { CardMeta, CardPayload, CardSection, CardTone } from "@/types/agent";
 
 /**
  * 轻量 Markdown 渲染组件（零依赖）
@@ -6,8 +8,95 @@ import React from "react";
  * 覆盖对话场景常见语法：标题、粗体/斜体/删除线、行内代码、代码块、
  * 有序/无序列表、表格、引用、分割线、链接与裸链接。
  *
+ * 另有一个「数据卡片」兜底：若模型没有调用 render_card 工具，而是直接输出了
+ * ```lead-card / ```data-card 围栏（内含 JSON），这里会把它渲染成卡片，
+ * 与工具链产出的卡片使用同一个组件，保证展示一致。
+ *
  * 说明：内容全部作为 React 文本节点渲染，不注入 HTML，天然免疫 XSS。
  */
+
+/* ======================== 数据卡片兜底（围栏约定） ======================== */
+
+/** 围栏语言 → 卡片类型 */
+const CARD_FENCE_LANGS: Record<string, string> = {
+  "lead-card": "lead_analysis",
+  "data-card": "generic",
+  card: "generic",
+};
+
+const CARD_FENCE_TONES = new Set<string>([
+  "high",
+  "mid",
+  "low",
+  "warn",
+  "info",
+  "neutral",
+]);
+
+function parseMeta(raw: unknown): CardMeta[] {
+  if (!Array.isArray(raw)) return [];
+  const out: CardMeta[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const obj = item as Record<string, unknown>;
+    if (obj.label == null || obj.value == null) continue;
+    const label = String(obj.label).trim();
+    const value = String(obj.value).trim();
+    if (!label && !value) continue;
+    out.push({ label, value });
+  }
+  return out;
+}
+
+function parseSections(raw: unknown): CardSection[] {
+  if (!Array.isArray(raw)) return [];
+  const out: CardSection[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const obj = item as Record<string, unknown>;
+    if (obj.label == null || obj.value == null) continue;
+    const section: CardSection = {
+      label: String(obj.label).trim(),
+      value: String(obj.value).trim(),
+    };
+    const tone = typeof obj.tone === "string" ? obj.tone.toLowerCase() : "";
+    if (CARD_FENCE_TONES.has(tone)) section.tone = tone as CardTone;
+    if (section.label || section.value) out.push(section);
+  }
+  return out;
+}
+
+/**
+ * 尝试把围栏代码块解析成卡片数据。
+ * 解析失败（含流式中途的半截 JSON）返回 null，此时按普通代码块渲染。
+ */
+function parseCardFence(lang: string, code: string, seed: string): CardPayload | null {
+  const cardType = CARD_FENCE_LANGS[(lang || "").toLowerCase()];
+  if (!cardType) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(code);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+
+  const obj = parsed as Record<string, unknown>;
+  const sections = parseSections(obj.sections);
+  if (sections.length === 0) return null;
+  const meta = parseMeta(obj.meta);
+
+  const title =
+    typeof obj.title === "string" && obj.title.trim() ? obj.title.trim() : "分析结果";
+
+  return {
+    card_id: `mdcard-${seed}`,
+    card_type: cardType,
+    title,
+    data: meta.length > 0 ? { meta, sections } : { sections },
+  };
+}
 
 /* ============================ 行内解析 ============================ */
 
@@ -80,7 +169,8 @@ type Block =
   | { type: "table"; head: string[]; rows: string[][] }
   | { type: "para"; lines: string[] };
 
-const RE_FENCE = /^\s*```(\w*)\s*$/;
+// 围栏语言需允许连字符（如 ```lead-card）；`\w` 不含 `-`，故显式列出字符集
+const RE_FENCE = /^\s*```([A-Za-z0-9_+#.-]*)\s*$/;
 const RE_FENCE_END = /^\s*```\s*$/;
 const RE_HR = /^\s*(?:[-*_]\s*){3,}$/;
 const RE_HEADING = /^(#{1,6})\s+(.*)$/;
@@ -218,13 +308,22 @@ const HEADING_SIZE = [21, 18.5, 16.5, 15, 14, 13];
 
 function renderBlock(block: Block, key: number): React.ReactNode {
   switch (block.type) {
-    case "code":
+    case "code": {
+      // 卡片兜底：命中围栏约定且 JSON 合法时渲染成卡片，否则按普通代码块
+      const card = parseCardFence(block.lang, block.code, String(key));
+      if (card) {
+        return (
+          <div key={key} className="md-card">
+            <DataCard card={card} />
+          </div>
+        );
+      }
       return (
         <pre key={key} className="md-pre">
           <code>{block.code}</code>
         </pre>
       );
-
+    }
     case "heading":
       return (
         <div

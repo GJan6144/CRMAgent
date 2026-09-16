@@ -4,7 +4,8 @@
   A. 读取：模型调用 crm_* 读工具并给出统计
   B. 写入-批准：触发 approval_request -> approve -> 工具执行 -> 数据落盘
   C. 写入-拒绝：触发 approval_request -> reject -> 数据不变
-测试会话在结束时删除。
+测试会话在结束时删除。CRM 数据由 `crm_data_guard` 在进程退出时**逐字节还原**
+（用例 B 会真的写入落盘，测试自己没法撤销）。
 """
 import json
 import threading
@@ -12,6 +13,10 @@ import time
 import uuid
 
 import requests
+
+from crm_data_guard import install_guard
+
+install_guard()
 
 BASE = "http://127.0.0.1:8765"
 CRM_LEADS = r"C:\Users\Administrator\Documents\deepagent\CRM_Agent1.0\data\leads.json"

@@ -663,13 +663,5 @@
     "trialDuration": 85,
     "communicationCount": 4,
     "idCard": "310101199306160169"
-  },
-  {
-    "id": "LD-2026-0036",
-    "createdAt": "2026-09-14 07:42",
-    "name": "自动化测试客户",
-    "phone": "13900009999",
-    "source": "官网",
-    "priority": "high"
   }
 ]

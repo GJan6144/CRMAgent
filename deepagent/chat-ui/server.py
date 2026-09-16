@@ -30,7 +30,29 @@ from crm_tools import (  # noqa: E402
     CRM_DATA_DIR as CRM_DATA_DIR,
 )
 
-# --- Agent 控制面板：可配置项（系统提示词 / 工具开关 / 工具权限）---
+# --- 对话流数据卡片工具（render_card：content 给模型 / artifact 给界面）---
+from card_tools import (  # noqa: E402
+    CARD_TOOLS,
+    CARD_TOOL_NAMES,
+)
+
+# --- 本地知识库工具（KB_TOOLS：检索 / 导入 / 查看 / 删除）---
+from kb_tools import (  # noqa: E402
+    KB_TOOLS,
+    KB_TOOL_NAMES,
+)
+
+# --- 知识库文件上传（前端「Agent 知识库」页：列表 / 上传 / 删除 / 进度）---
+from kb_embeddings import describe as kb_embedding_describe  # noqa: E402
+from kb_store import get_store as kb_get_store  # noqa: E402
+from kb_upload import (  # noqa: E402
+    delete_documents as kb_delete_documents,
+    describe as kb_upload_describe,
+    get_manager as kb_get_manager,
+    is_managed_file as kb_is_managed_file,
+)
+
+# --- Agent 控制面板：可配置项（系统提示词 / 工具开关 / 工具权限 / 技能开关）---
 from agent_config import (  # noqa: E402
     effective as agent_effective,
     catalog as agent_catalog,
@@ -39,12 +61,28 @@ from agent_config import (  # noqa: E402
     reset_system_prompt,
     set_tool_enabled,
     set_tool_policy,
+    get_skill_overrides,
+    set_skill_enabled,
     reset_all as reset_agent_config,
     summary as agent_config_summary,
     POLICIES as AGENT_POLICIES,
     POLICY_LABELS as AGENT_POLICY_LABELS,
     CATEGORY_ORDER as AGENT_CATEGORY_ORDER,
     UnknownToolError,
+    UnknownSkillError,
+)
+
+# --- Agent 控制面板：Skill 管理（扫盘 / 校验 / 读写 SKILL.md）---
+from skills_admin import (  # noqa: E402
+    MAX_EDITABLE_BYTES,
+    SkillSource,
+    SkillError,
+    SkillNotFound,
+    SkillValidationError,
+    catalog as skill_catalog,
+    find as skill_find,
+    read_content as skill_read_content,
+    write_content as skill_write_content,
 )
 
 # Configure DeepSeek before importing langchain
@@ -60,7 +98,7 @@ if _env_file.exists():
 os.environ.setdefault("OPENAI_API_KEY", "your-deepseek-api-key")
 os.environ.setdefault("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, FileResponse, Response
 from pydantic import BaseModel
@@ -115,6 +153,9 @@ class FsApprovalMiddleware(AgentMiddleware):
     # 文件写入类工具：改造前默认走审批；面板可覆盖为 allow / deny
     FS_WRITE_TOOLS = {"write_file", "edit_file"}
 
+    # 能读到文件内容的工具：被关闭技能的 SKILL.md 要挡住（见 _disabled_skill_in_path）
+    SKILL_READ_TOOLS = {"read_file", "grep"}
+
     # 「禁止」档的默认提示语（可在面板中改档，但提示语按工具固定）
     DENY_REASONS: dict[str, str] = {
         "crm_delete": (
@@ -134,6 +175,8 @@ class FsApprovalMiddleware(AgentMiddleware):
         self.disabled_tools: set[str] = set(eff.get("disabled_tools") or [])
         self.approval_tools: set[str] = set(eff.get("approval_tools") or [])
         self.deny_tools: set[str] = set(eff.get("deny_tools") or [])
+        # 被「Skill 管理」关闭的技能：其 SKILL.md 及目录内其它文件不可读
+        self.disabled_skills: set[str] = set(eff.get("disabled_skills") or [])
 
     def _policy(self, name: str) -> str:
         spec = self.settings.get(name)
@@ -144,6 +187,22 @@ class FsApprovalMiddleware(AgentMiddleware):
         while p.startswith("/"):
             p = p[1:]
         return PROJECT_DIR / p
+
+    def _disabled_skill_in_path(self, file_path: str) -> str | None:
+        """路径是否落在某个「已关闭技能」目录里；是则返回技能名。
+
+        技能目录 = 技能来源目录的**直接子目录**（`<source>/<skill-name>/...`）。
+        这里要求技能名的上一段包含 "skill"（`skills` / `built_in_skills` 都命中），
+        以免把同名的普通目录误判成技能。
+        """
+        if not file_path or not self.disabled_skills:
+            return None
+        segments = [s for s in file_path.replace("\\", "/").split("/") if s]
+        for i in range(1, len(segments)):
+            seg = segments[i]
+            if seg in self.disabled_skills and "skill" in segments[i - 1].lower():
+                return seg
+        return None
 
     @staticmethod
     def _blocked_kwargs(policy: str, reason: str, tc: dict) -> dict:
@@ -180,6 +239,32 @@ class FsApprovalMiddleware(AgentMiddleware):
 
         for idx, tc in enumerate(last_ai_msg.tool_calls):
             name = tc.get("name", "")
+
+            # 0) 读取「已关闭技能」目录内的文件 → 禁止。
+            #    技能关闭后只从提示词里摘掉是不够的：模型可能从历史上下文里
+            #    记住了 SKILL.md 的路径，照样能 read_file 把正文读回来。
+            if name in self.SKILL_READ_TOOLS and self.disabled_skills:
+                args = tc.get("args") or {}
+                targets = [
+                    v for k, v in args.items()
+                    if k in ("file_path", "path", "file", "filename") and isinstance(v, str)
+                ]
+                hit = next(
+                    (s for s in (self._disabled_skill_in_path(t) for t in targets) if s),
+                    None,
+                )
+                if hit:
+                    revised.append(tc)
+                    deny_msg = (
+                        f"禁止读取技能「{hit}」的文件：该技能已被管理员关闭，"
+                        "其 SKILL.md 与附属文件均不可用。"
+                    )
+                    artificial.append(ToolMessage(
+                        content=deny_msg,
+                        name=name, tool_call_id=tc.get("id", ""), status="error",
+                        additional_kwargs=self._blocked_kwargs("skill_disabled", deny_msg, tc),
+                    ))
+                    continue
 
             # 1) 禁止档 / 已关闭：拦截并推送「禁止」提示，工具绝不执行。
             #    保留 tool_call（错误 ToolMessage 需要合法前驱），由注入的
@@ -285,6 +370,7 @@ from deepagents import (
     SubAgent,
 )
 from deepagents.backends.local_shell import LocalShellBackend
+from deepagents.middleware.skills import SkillsMiddleware, SKILLS_SYSTEM_PROMPT
 from langchain_core.tools import tool
 
 # --- Config ---
@@ -294,6 +380,27 @@ PROJECT_DIR = Path(__file__).parent.parent  # deepagents root
 DB_PATH = CHAT_UI_DIR / "chat.db"
 STATIC_DIR = CHAT_UI_DIR / "static"
 SKILLS_DIR = CHAT_UI_DIR / "skills"
+
+
+def _resolve_builtin_skills_dir() -> Path | None:
+    """定位框架内置技能目录（remember / skill-creator 等随框架发布）。
+
+    优先取已安装的 ``deepagents_code`` 包内路径，回退到仓库源码路径；
+    两者都不存在时返回 ``None``（此时仅不启用内置技能，不影响其他来源）。
+    """
+    candidates: list[Path] = []
+    try:
+        import deepagents_code  # type: ignore[import-not-found]
+
+        candidates.append(Path(deepagents_code.__file__).parent / "built_in_skills")
+    except Exception:
+        pass
+    candidates.append(PROJECT_DIR / "libs" / "code" / "deepagents_code" / "built_in_skills")
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return None
+
 
 MODEL_NAME = "deepseek-v4-flash"
 
@@ -644,12 +751,40 @@ base_tools = [
     # 模型可见、可调用，但 FsApprovalMiddleware 会在运行时一律拒绝并推送 tool_blocked，
     # 前端弹出「禁止」提示，物理上无法删除。
     *CRM_AGENT_WRITE_TOOLS,
+    # 对话流数据卡片（无副作用，只影响展示，默认直接放行）
+    *CARD_TOOLS,
+    # 本地知识库：检索 / 查看 默认放行；导入 / 删除 默认人工审批
+    # （导入会调用远程 Embedding 消耗额度，删除会改库文件）
+    *KB_TOOLS,
 ]
 search_tool = [web_search]
 
 # 「本地工具」按名索引：供「Agent 控制面板」按名过滤（开关）与判定权限
 LOCAL_TOOLS = base_tools + search_tool
 LOCAL_TOOLS_BY_NAME: dict[str, object] = {t.name: t for t in LOCAL_TOOLS}
+
+
+def _extract_card(msg, tool_name: str, tool_call_id: str) -> dict | None:
+    """从 ``render_card`` 工具产生的 ToolMessage 中取出数据卡片。
+
+    卡片数据走 ``ToolMessage.artifact``（与给模型看的 ``content`` 分离），
+    这里做一次结构与内容校验；任何一步不满足都返回 ``None``（不产生卡片，
+    只在工具列表里留一条普通调用记录）。
+    """
+    if tool_name not in CARD_TOOL_NAMES:
+        return None
+    artifact = getattr(msg, "artifact", None)
+    if not isinstance(artifact, dict):
+        return None
+    data = artifact.get("data")
+    if not isinstance(data, dict) or not data.get("sections"):
+        return None
+    return {
+        "card_id": f"card-{tool_call_id or uuid.uuid4().hex}",
+        "card_type": str(artifact.get("card_type") or "generic"),
+        "title": str(artifact.get("title") or "分析结果"),
+        "data": data,
+    }
 
 # --- Subagents ---
 subagents = [
@@ -703,8 +838,146 @@ subagents = [
     ),
 ]
 
-# --- Skills ---
-skills = [str(SKILLS_DIR)]
+# --- Skills（框架标准分层来源）---
+# 来源按「低 → 高」优先级排列，同名技能由高优先级覆盖（与 deepagents-code 的约定一致）：
+#   内置 → 项目 .deepagents → 项目 .agents → 项目 .claude → 本服务 chat-ui/skills（最高）
+#
+# 约束：agent 的文件系统 backend 是 virtual_mode=True、根目录 = 框架根（PROJECT_DIR），
+# 因此技能目录**必须位于该根内**。否则模型虽然能在系统提示词里「看到」技能，
+# 却无法用 read_file 读取其 SKILL.md（会被判为 outside root directory）。
+# 故这里统一使用「根内虚拟路径」；用户级目录（~/.deepagents、~/.agents、~/.claude）
+# 不在根内，不纳入（需要时可把目录放进项目根，或用符号链接挂进来）。
+def _skill_real_path(virtual_path: str) -> Path:
+    """把技能的虚拟路径映射回真实文件系统路径。"""
+    return PROJECT_DIR / virtual_path.lstrip("/")
+
+
+def _collect_skill_sources() -> list[tuple[str, str]]:
+    """收集可用的技能来源（仅真实存在且位于 agent 根目录内的目录）。
+
+    Returns:
+        `(虚拟路径, 显示标签)` 列表，顺序即优先级（越靠后越高）。
+    """
+    root = PROJECT_DIR.resolve()
+    candidates: list[tuple[Path | None, str]] = [
+        (_resolve_builtin_skills_dir(), "Built-in"),
+        (PROJECT_DIR / ".deepagents" / "skills", "Project Deepagents"),
+        (PROJECT_DIR / ".agents" / "skills", "Project Agents"),
+        (PROJECT_DIR / ".claude" / "skills", "Project Claude"),
+        (SKILLS_DIR, "Chat UI"),
+    ]
+    sources: list[tuple[str, str]] = []
+    for path, label in candidates:
+        if path is None:
+            continue
+        try:
+            real = path.resolve()
+            if not real.is_dir():
+                continue
+            relative = real.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        sources.append(("/" + relative.as_posix(), label))
+    return sources
+
+
+SKILL_SOURCES = _collect_skill_sources()
+skills = [virtual_path for virtual_path, _label in SKILL_SOURCES]
+
+
+def _admin_skill_sources() -> list[SkillSource]:
+    """把 `SKILL_SOURCES` 转成面板用的来源对象（带真实目录）。"""
+    return [
+        SkillSource(label=label, virtual_path=vpath, real_dir=_skill_real_path(vpath))
+        for vpath, label in SKILL_SOURCES
+    ]
+
+
+# SKILL.md 被改动前的历史副本落在这里（集中存放，避免污染技能目录本身）
+SKILL_BACKUP_DIR = CHAT_UI_DIR / "_skill_backups"
+
+
+class SkillsControlMiddleware(SkillsMiddleware):
+    """框架 `SkillsMiddleware` + 「启用 / 关闭」。
+
+    框架的技能机制里**没有开关**：加载时扫盘、`modify_request` 全量渲染进系统
+    提示词，中间没有任何过滤点。这里在框架基础上只加两件事：
+
+    1. **过滤**：被关闭的技能不进 `skills_metadata`，也就不进系统提示词 ——
+       模型根本不知道它存在，自然不会去用（这是「关闭」的主要手段）；
+    2. **强制重载**：框架把 `skills_metadata` 按**会话**缓存在 state 里
+       （`if "skills_metadata" in state: return None`），只有新会话才重新扫盘。
+       这里每次都重新加载，让面板开关在**下一轮对话**就生效，
+       不必等用户开新会话（与工具开关的行为保持一致）。
+
+    ⚠️ **同步 / 异步是两套独立实现**：框架把加载逻辑在 `before_agent`（同步）与
+    `abefore_agent`（异步，`async def`，自己重新实现了一遍而不是 `return
+    self.before_agent(...)`）里各写了一份。chat-ui 的 `/api/chat` 是异步的，
+    实际走的是 **`abefore_agent`** —— 只覆写同步版会**完全不生效**（而且不报错：
+    技能照旧全量注入，表面上一切正常）。两个入口必须都覆写。
+    `modify_request` / `wrap_model_call` 侧没有这个问题，渲染读的是 state。
+
+    兜底拦截（读被关闭技能的 SKILL.md）在 `FsApprovalMiddleware` 里，
+    那才是「不可用」的硬保证 —— 提示词过滤只解决「模型不知道」，
+    挡不住模型从历史上下文里记住了旧路径。
+
+    实现上刻意**不碰框架私有函数**：先 `state` 里摘掉缓存字段，再调 `super()`
+    走框架原生的加载逻辑（连同它的错误信息格式一起复用），最后过滤结果。
+    """
+
+    def __init__(
+        self,
+        *,
+        backend,
+        sources,
+        disabled: set[str] | None = None,
+        system_prompt: str | None = SKILLS_SYSTEM_PROMPT,
+    ) -> None:
+        super().__init__(backend=backend, sources=sources, system_prompt=system_prompt)
+        self.disabled_skills: set[str] = set(disabled or ())
+
+    def refresh(self, disabled) -> None:
+        """按最新配置刷新「已关闭技能」集合。"""
+        self.disabled_skills = set(disabled or ())
+
+    @staticmethod
+    def _without_cache(state):
+        """摘掉框架的「每会话只加载一次」缓存字段，逼它重新扫盘。"""
+        clean = dict(state)
+        clean.pop("skills_metadata", None)
+        clean.pop("skills_load_errors", None)
+        return clean
+
+    def _apply(self, update):
+        """把框架加载结果里被关闭的技能剔掉（同步 / 异步共用）。"""
+        if not update:
+            return update
+        loaded = update.get("skills_metadata")
+        if loaded is not None and self.disabled_skills:
+            update["skills_metadata"] = [
+                s for s in loaded if s.get("name") not in self.disabled_skills
+            ]
+        return update
+
+    def before_agent(self, state, runtime, config):  # ty: ignore[invalid-method-override]
+        """同步入口（`invoke` / `stream`）。"""
+        return self._apply(
+            super().before_agent(self._without_cache(state), runtime, config)
+        )
+
+    async def abefore_agent(self, state, runtime, config):  # ty: ignore[invalid-method-override]
+        """异步入口（`ainvoke` / `astream`）—— chat-ui 的 `/api/chat` 走这条。
+
+        框架在这里**没有**复用同步实现，是独立的一份 async 加载逻辑，
+        所以必须单独覆写，否则过滤形同虚设。
+        """
+        return self._apply(
+            await super().abefore_agent(self._without_cache(state), runtime, config)
+        )
+
+
+# `_read_skill_summary` 已删除：技能简介统一由 `skills_admin` 解析 frontmatter
+# 得到（面板 / 右侧 Context 面板共用同一处，避免两边对「简介是什么」判断不一致）。
 
 # --- Rubric Middleware (disabled temporarily, needs grading model) ---
 rubric_middleware = None
@@ -731,6 +1004,9 @@ SYSTEM_PROMPT = """You are a helpful AI coding assistant. Respond in the same la
   - write (a human approval card is required): `crm_create`, `crm_update`
   - delete: **FORBIDDEN** — `crm_delete` is a tripwire: calling it is always blocked and shows the
     user a 「禁止」 notice, and nothing is ever deleted
+- Local **knowledge base** tools (semantic search over unstructured documents):
+  - read (allowed): `kb_search`, `kb_list_documents`
+  - write (approval required): `kb_ingest`, `kb_delete_document`
 - Persistent memory at `/chat-ui/AGENTS.md` (already loaded, do not re-read it)
 
 ## CRM Data Handling (IMPORTANT)
@@ -757,6 +1033,29 @@ SYSTEM_PROMPT = """You are a helpful AI coding assistant. Respond in the same la
   `crm_update`, and do not edit the JSON files directly).
 - Prefer handling CRM stats/analysis yourself with the read tools. Delegate to the
   **crm-stats** / **crm-analyst** sub-agents only for heavier multi-step statistical or analytical work.
+
+## Local Knowledge Base (IMPORTANT)
+- There is a **local knowledge base** (SQLite + vector search, Embedding by Qwen3-Embedding-0.6B)
+  holding unstructured documents: manuals, specs, policies, long-form notes. It is **not** for
+  structured business data — leads/orders/products always go through the `crm_*` tools.
+- Read (allowed — runs immediately):
+  - `kb_search(query, top_k, doc_id, tags)` — **semantic** search, returns the most relevant
+    passages together with their source document and similarity score. Ask in plain natural
+    language (「标准版一年多少钱」), never keyword soup.
+  - `kb_list_documents()` — list every document with chunk counts and tags. Use it when
+    `kb_search` finds nothing, to see what the base actually contains.
+- Write (a human approval card pops up; just call the tool normally, the system pauses for approval):
+  - `kb_ingest(path, title, tags)` — chunk + vectorize a file or directory into the base.
+    Re-importing an unchanged file is skipped automatically (zero cost), so it is safe to re-run.
+  - `kb_delete_document(doc_id)` — remove a document and all of its chunks.
+- **Use `kb_search` whenever the user asks about documents, manuals, specifications, policies, or
+  says "知识库".** Prefer it over `read_file` / `grep` for finding *meaning* in documents —
+  vector search matches paraphrases, exact keyword matching does not.
+- **Ground every knowledge-base answer in the retrieved passages and name the source document**
+  (e.g. 「根据《部署指南》…」). Name the document **title**, never its file path.
+- If nothing relevant was retrieved, say so plainly and suggest `kb_list_documents`, instead of
+  answering from general knowledge as if it had come from the base.
+- Pass `path` using the same `/`-prefixed virtual paths as the other filesystem tools.
 
 ## CRITICAL Response Rules
 1. **NEVER paste tool output verbatim — this is the #1 rule.** Every tool result is internal data. Whether it is a file list from `ls`, file content from `read_file`, command output, JSON, or search results — you MUST transform it into your own words. Summarize, categorize, extract what matters, and write it as natural Chinese/English prose with structure. Example: if `ls` returns `['/.dockerignore', '/.git/', '/chat-ui/', '/libs/', ...]`, you reply "项目根目录主要包含 chat-ui（Web 界面）、libs（SDK）、examples（示例）等" — you never paste the raw list.
@@ -794,16 +1093,27 @@ def _effective_system_prompt(eff: dict) -> str:
             "if a task requires one, tell the user it has been disabled:\n"
             + ", ".join(f"`{n}`" for n in disabled)
         )
+    # 被关闭的技能已从技能清单里过滤掉（模型看不到），这里再显式说一句，
+    # 防止模型凭历史上下文里的旧印象去找它的 SKILL.md（那条路会被硬拦截）。
+    disabled_skills = sorted(eff.get("disabled_skills") or [])
+    if disabled_skills:
+        base = base + (
+            "\n\n## Disabled Skills (IMPORTANT)\n"
+            "The administrator has disabled the following skills. They are NOT available: "
+            "do not follow their instructions and do not try to read their SKILL.md files:\n"
+            + ", ".join(f"`{n}`" for n in disabled_skills)
+        )
     return base
 
 
 def build_agent(use_search: bool = False):
     """按「Agent 控制面板」的最新配置构建 Agent。
 
-    每次请求都重建，使面板改动（工具开关 / 权限档 / 系统提示词）即时生效：
+    每次请求都重建，使面板改动（工具开关 / 权限档 / 系统提示词 / 技能开关）即时生效：
       1. 工具清单：按「启用开关」过滤，被关闭的工具不再对模型可见；
       2. 权限策略：刷新中间件的 禁止 / 关闭 / 审批 / 放行 集合；
-      3. 系统提示词：面板覆盖（若有）并追加「已关闭工具」说明。
+      3. 系统提示词：面板覆盖（若有）并追加「已关闭工具 / 已关闭技能」说明；
+      4. 技能：用 `SkillsControlMiddleware` 按开关过滤技能清单。
     """
     eff = agent_effective()
 
@@ -818,6 +1128,15 @@ def build_agent(use_search: bool = False):
     # 2) 刷新中间件运行时策略
     fs_approval_middleware.refresh(eff)
 
+    # 3) 技能：**不**走 `skills=` 参数（那会用框架原生的、无开关的 SkillsMiddleware），
+    #    改成自己塞一个带开关的版本进中间件栈。标签按 `SKILL_SOURCES` 显式给出，
+    #    系统提示词的「Sources」一节就能显示 Built-in / Chat UI 这些可读名字。
+    skills_middleware = SkillsControlMiddleware(
+        backend=backend,
+        sources=list(SKILL_SOURCES),
+        disabled=set(eff.get("disabled_skills") or []),
+    )
+
     return create_deep_agent(
         model=_deepseek_model,
         backend=backend,
@@ -825,10 +1144,10 @@ def build_agent(use_search: bool = False):
         checkpointer=checkpointer,
         store=store,
         subagents=subagents,
-        skills=skills,
+        skills=None,
         memory=["/chat-ui/AGENTS.md"],
         tools=tools,
-        middleware=(fs_approval_middleware,),
+        middleware=(fs_approval_middleware, skills_middleware),
         system_prompt=_effective_system_prompt(eff),
     )
 
@@ -859,6 +1178,12 @@ def init_db():
             FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
         )
     """)
+    # Migration: 助手消息携带的数据卡片（render_card 的 artifact），JSON 数组文本。
+    # 为空表示该消息没有卡片；历史库自动补列，无需重建。
+    cursor = conn.execute("PRAGMA table_info(messages)")
+    msg_cols = [row[1] for row in cursor.fetchall()]
+    if 'cards' not in msg_cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN cards TEXT NOT NULL DEFAULT ''")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS feedback (
             id TEXT PRIMARY KEY,
@@ -956,6 +1281,9 @@ class FeedbackRequest(BaseModel):
     session_id: str
     rating: str  # "like" or "dislike"
 
+class KbDeleteRequest(BaseModel):
+    doc_ids: list[str] = []
+
 # --- App ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1029,7 +1357,31 @@ def get_messages(session_id: str):
         "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC", (session_id,)
     ).fetchall()
     db.close()
-    return [{"id": m["id"], "role": m["role"], "content": m["content"], "created_at": m["created_at"]} for m in messages]
+
+    def _cards_of(row) -> list:
+        """解析落库的卡片 JSON；老数据 / 脏数据一律当作没有卡片。"""
+        try:
+            raw = row["cards"]
+        except (IndexError, KeyError):
+            return []
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return []
+        return parsed if isinstance(parsed, list) else []
+
+    return [
+        {
+            "id": m["id"],
+            "role": m["role"],
+            "content": m["content"],
+            "created_at": m["created_at"],
+            "cards": _cards_of(m),
+        }
+        for m in messages
+    ]
 
 # --- Feedback API ---
 @app.post("/api/feedback")
@@ -1073,6 +1425,14 @@ def get_capabilities():
         "shell_execution": True,
         "memory_agents_md": True,
         "skills": True,
+        # 技能：框架标准分层来源（数组顺序 = 优先级由低到高，同名由高优先级覆盖）
+        "skill_sources": [
+            {"label": label, "path": vpath, "real_path": str(_skill_real_path(vpath))}
+            for vpath, label in SKILL_SOURCES
+        ],
+        "skill_source_count": len(SKILL_SOURCES),
+        # 技能目录须位于 agent 文件系统根内，模型才能 read_file 读取（见 _collect_skill_sources）
+        "skill_backend": "LocalShellBackend(virtual_mode=True)（与主 backend 一致）",
         "sub_agents": True,
         "permissions": True,
         "checkpointer": True,
@@ -1109,6 +1469,15 @@ def get_capabilities():
         "disabled_tools": sorted(fs_approval_middleware.disabled_tools),
         "panel_config_endpoint": "/api/panel/config",
         "panel_overview_endpoint": "/api/panel/overview",
+        # ---- Skill 管理（面板「Skill 管理」Tab）----
+        "skill_management": True,
+        "skill_panel_endpoint": "/api/panel/skills",
+        "skill_content_endpoint": "/api/panel/skills/{name}/content",
+        "skill_toggle": True,
+        "skill_edit": True,
+        # 关闭的技能不进系统提示词，且读取其 SKILL.md 会被拦截（skill_disabled 策略）
+        "skill_disabled_policy": "skill_disabled",
+        "disabled_skills": sorted(fs_approval_middleware.disabled_skills),
     }
 
 
@@ -1130,6 +1499,14 @@ class ToolEnabledRequest(BaseModel):
 
 class ToolPolicyRequest(BaseModel):
     policy: str
+
+
+class SkillEnabledRequest(BaseModel):
+    enabled: bool
+
+
+class SkillContentRequest(BaseModel):
+    content: str
 
 
 def _metric_summary(scope: str = "all") -> dict:
@@ -1345,10 +1722,109 @@ def panel_set_tool_policy(name: str, req: ToolPolicyRequest):
 
 @app.post("/api/panel/reset")
 def panel_reset():
-    """一键恢复默认：系统提示词 + 全部工具开关与权限。"""
+    """一键恢复默认：系统提示词 + 全部工具开关与权限 + 全部技能开关。"""
     reset_agent_config()
     fs_approval_middleware.refresh(agent_effective())
     return _panel_config_payload()
+
+
+# --------------------------------------------------------------------------
+# Skill 管理（面板「Skill 管理」Tab）
+# --------------------------------------------------------------------------
+#   GET /api/panel/skills                技能清单（含开关、来源、校验结果）
+#   PUT /api/panel/skills/{name}         开 / 关一个技能
+#   GET /api/panel/skills/{name}/content 读 SKILL.md 原文
+#   PUT /api/panel/skills/{name}/content 改 SKILL.md 原文（校验 → 备份 → 原子写）
+#
+# 技能的**目录**不可增删（面板只做「开关 + 改内容」）；清单每次请求实时扫盘，
+# 因为技能是往目录里放文件就能生效的，没有注册表可查。
+
+def _panel_skills_payload() -> dict:
+    """技能清单 + 汇总（扫盘结果 × 配置里的开关）。"""
+    cat = skill_catalog(_admin_skill_sources(), get_skill_overrides())
+    summary = cat["summary"]
+    summary["updated_at"] = agent_effective()["updated_at"]
+    return {
+        "skills": cat["skills"],
+        "summary": summary,
+        "backup_dir": str(SKILL_BACKUP_DIR),
+        "limit_bytes": MAX_EDITABLE_BYTES,
+    }
+
+
+@app.get("/api/panel/skills")
+def panel_list_skills():
+    return _panel_skills_payload()
+
+
+@app.put("/api/panel/skills/{name}")
+def panel_set_skill_enabled(name: str, req: SkillEnabledRequest):
+    try:
+        # 先确认技能真的存在（在配置里存一个不存在的名字没有任何意义）
+        skill_find(name, _admin_skill_sources())
+        set_skill_enabled(name, req.enabled)
+    except UnknownSkillError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except SkillNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    # 拦截「读被关闭技能的 SKILL.md」的中间件是常驻单例，改完开关立刻刷新，
+    # 不必等下一轮 build_agent
+    fs_approval_middleware.refresh(agent_effective())
+    payload = _panel_skills_payload()
+    return {
+        "ok": True,
+        "skill": next((s for s in payload["skills"] if s["name"] == name), None),
+        "summary": payload["summary"],
+    }
+
+
+@app.get("/api/panel/skills/{name}/content")
+def panel_get_skill_content(name: str):
+    try:
+        entry = skill_read_content(name, _admin_skill_sources())
+    except SkillNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except SkillValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "name": entry["name"],
+        "content": entry["content"],
+        "path": entry["path"],
+        "virtual_path": entry["virtual_path"],
+        "source": entry["source"],
+        "builtin": entry["builtin"],
+        "size": entry["size"],
+        "chars": entry["chars"],
+        "lines": entry["lines"],
+        "mtime": entry["mtime"],
+        "problems": entry["problems"],
+        "warnings": entry["warnings"],
+        "backup_dir": str(SKILL_BACKUP_DIR),
+        "limit_bytes": MAX_EDITABLE_BYTES,
+    }
+
+
+@app.put("/api/panel/skills/{name}/content")
+def panel_put_skill_content(name: str, req: SkillContentRequest):
+    try:
+        saved = skill_write_content(
+            name, req.content, _admin_skill_sources(), SKILL_BACKUP_DIR
+        )
+    except SkillNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except SkillValidationError as e:
+        # 422 而非 400：语义是「内容本身不合法，请按 problems 改」
+        raise HTTPException(status_code=422, detail={"message": str(e), "problems": e.problems})
+    except SkillError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    payload = _panel_skills_payload()
+    return {
+        "ok": True,
+        "skill": next((s for s in payload["skills"] if s["name"] == name), None),
+        "summary": payload["summary"],
+        "warnings": saved.get("warnings", []),
+        "backup_dir": saved.get("backup_dir"),
+    }
 
 
 @app.get("/api/context/{session_id}")
@@ -1391,33 +1867,20 @@ def get_context(session_id: str):
     ]
     # Built-in filesystem/shell tools provided by the backend (informational)
     backend_tools = ["ls", "ls_info", "read", "write", "edit", "delete", "glob", "glob_info", "grep", "grep_raw", "execute"]
-    # Skill index: scan SKILLS_DIR subdirectories
-    skill_index = []
-    if SKILLS_DIR.exists():
-        for child in sorted(SKILLS_DIR.iterdir()):
-            if not child.is_dir():
-                continue
-            skill_md = child / "SKILL.md"
-            summary = ""
-            if skill_md.exists():
-                try:
-                    head = skill_md.read_text(encoding="utf-8").split("---")
-                    # Try frontmatter summary
-                    if len(head) >= 3:
-                        for line in head[1].splitlines():
-                            if line.strip().startswith("summary:"):
-                                summary = line.split("summary:", 1)[1].strip().strip("\"'")
-                                break
-                    if not summary:
-                        # First non-empty, non-heading line
-                        for line in skill_md.read_text(encoding="utf-8").splitlines():
-                            s = line.strip().lstrip("#").strip()
-                            if s and not s.startswith("---"):
-                                summary = s
-                                break
-                except Exception:
-                    summary = ""
-            skill_index.append({"name": child.name, "path": str(child), "summary": summary})
+    # Skill index：扫盘结果 × 面板开关（与「Skill 管理」Tab 同一个数据源，
+    # 保证右侧 Context 面板和面板里看到的清单不会对不上）
+    skill_index = [
+        {
+            "name": s["name"],
+            "path": s["path"],
+            "summary": s["description"],
+            "source": s["source"],
+            "source_path": s["source_path"],
+            "enabled": s["enabled"],
+            "valid": s["valid"],
+        }
+        for s in skill_catalog(_admin_skill_sources(), get_skill_overrides())["skills"]
+    ]
     return {
         # 反映面板的有效系统提示词（含「已关闭工具」说明）
         "system_prompt": _effective_system_prompt(eff),
@@ -1508,8 +1971,12 @@ async def chat(req: SendMessageRequest):
         full_response = ""
         full_thinking = ""
         ai_msg_id = None
+        # 本轮产出的数据卡片（render_card 工具的 artifact），随助手消息一起落库
+        turn_cards: list[dict] = []
         # 同一 tool_call 可能出现在多个节点输出里，按 id 去重，避免前端重复气泡
         seen_tool_starts: set[str] = set()
+        # 卡片同样按 card_id 去重
+        seen_card_ids: set[str] = set()
 
         def _emit(payload):
             """Wrap a payload as an SSE data line with a timestamp."""
@@ -1651,6 +2118,20 @@ async def chat(req: SendMessageRequest):
                                 })
                             else:
                                 yield _emit({"event": "tool_end", "status": "tool_end", "id": t_id, "name": t_name, "tool_status": t_status, "result": t_result, "node": node_name})
+                                # 数据卡片：render_card 工具通过 artifact 回传结构化数据，
+                                # 单独推送一条 card 事件，让卡片随工具返回即时出现在对话流中。
+                                card = _extract_card(last, t_name, t_id)
+                                if card is not None and card["card_id"] not in seen_card_ids:
+                                    seen_card_ids.add(card["card_id"])
+                                    turn_cards.append(card)
+                                    yield _emit({
+                                        "event": "card",
+                                        "status": "card",
+                                        "id": t_id,
+                                        "name": t_name,
+                                        "card": card,
+                                        "node": node_name,
+                                    })
                 if not interrupted:
                     break  # stream finished
 
@@ -1658,8 +2139,10 @@ async def chat(req: SendMessageRequest):
             ai_msg_id = str(uuid.uuid4())
             now_str = datetime.now().isoformat()
             db = get_db()
-            db.execute("INSERT INTO messages (id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-                       (ai_msg_id, req.session_id, "assistant", full_response, now_str))
+            # 本轮产出的数据卡片随助手消息一起落库（空则存空串）
+            cards_json = json.dumps(turn_cards, ensure_ascii=False) if turn_cards else ""
+            db.execute("INSERT INTO messages (id, session_id, role, content, created_at, cards) VALUES (?, ?, ?, ?, ?, ?)",
+                       (ai_msg_id, req.session_id, "assistant", full_response, now_str, cards_json))
             if full_thinking:
                 # Store thinking as a separate hidden message
                 think_msg_id = str(uuid.uuid4())
@@ -1692,6 +2175,123 @@ async def chat(req: SendMessageRequest):
             yield _emit({"event": "error", "error": str(e)})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+# --- Knowledge Base File Management（前端「Agent 知识库」页） ---
+# 七个接口：
+#   GET  /api/kb/overview      库概览 + 上传能力（允许的类型 / 大小上限）
+#   GET  /api/kb/documents     已挂载文档列表（含来源文件状态）
+#   GET  /api/kb/chunks        切片后的正文（点文件名 / 片段数时弹的「切片预览」）
+#   POST /api/kb/upload        上传一个文件（**body = 原始字节**），返回任务
+#   GET  /api/kb/tasks         任务列表（页面刷新后据此恢复进度）
+#   GET  /api/kb/tasks/{id}    单任务进度（前端轮询）
+#   POST /api/kb/delete        按 doc_id 批量删除
+#
+# 上传刻意不用 multipart：省掉 python-multipart 依赖，也避免二进制文件
+# （xlsx）在解析/转发途中被按 UTF-8 解码弄坏。文件名走 query 参数。
+
+def _kb_doc_payload() -> dict:
+    """文档列表 + 每篇的来源文件状态。
+
+    ``managed`` 表示来源文件位于受管上传目录内 —— 删除文档时会连带清理；
+    外部导入的文档（手工放进项目的那种）永远不动。
+    """
+    store = kb_get_store()
+    docs = store.list_documents()
+    for d in docs:
+        src = (d.get("source") or "").strip()
+        p = Path(src) if src else None
+        exists = bool(p and p.is_file())
+        d["source_name"] = p.name if p else ""
+        d["source_exists"] = exists
+        d["source_size"] = p.stat().st_size if (p and exists) else 0
+        d["managed"] = bool(p and kb_is_managed_file(p))
+    return {"data": docs, "total": len(docs), "stats": store.stats()}
+
+
+@app.get("/api/kb/overview")
+def kb_overview():
+    return {
+        "stats": kb_get_store().stats(),
+        "upload": kb_upload_describe(),
+        "embedding": kb_embedding_describe(),
+    }
+
+
+@app.get("/api/kb/documents")
+def kb_document_list():
+    return _kb_doc_payload()
+
+
+# 「切片预览」一次最多返回多少个片段。片段正文不大（中文语料默认 800 字/块），
+# 200 条也就几十 KB；超出的靠 offset 翻页继续取。
+MAX_CHUNK_WINDOW = 200
+
+
+@app.get("/api/kb/chunks")
+def kb_chunk_list(doc_ids: str = "", limit: int = MAX_CHUNK_WINDOW, offset: int = 0):
+    """取**切片后的正文**（前端点文件名 / 片段数时弹的「切片预览」抽屉）。
+
+    ``doc_ids`` 逗号分隔 —— 一个知识库文件会拆成多篇文档（问答表按分类拆），
+    文件详情要一口气拿到全部，逐个请求会有 N 次往返。doc_id 形如 ``kb-<hex12>``，
+    不含逗号，是安全分隔符。
+    """
+    ids = [d.strip() for d in (doc_ids or "").split(",") if d.strip()]
+    if not ids:
+        raise HTTPException(status_code=400, detail="doc_ids 不能为空")
+    try:
+        return kb_get_store().list_chunks(
+            ids,
+            limit=max(1, min(limit, MAX_CHUNK_WINDOW)),
+            offset=max(0, offset),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/kb/upload")
+async def kb_upload_file(request: Request, filename: str = "", tags: str = ""):
+    """上传一个知识库文件：body 就是文件原始字节，文件名通过 query 传入。"""
+    data = await request.body()
+    try:
+        return kb_get_manager().submit(filename, data, tags=tags)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/kb/tasks")
+def kb_task_list(limit: int = 50):
+    mgr = kb_get_manager()
+    return {"data": mgr.list(limit=max(1, min(limit, 200))), "active": mgr.has_active()}
+
+
+@app.get("/api/kb/tasks/{task_id}")
+def kb_task_detail(task_id: str):
+    task = kb_get_manager().get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在：{task_id}")
+    return task
+
+
+@app.post("/api/kb/delete")
+def kb_delete_docs(req: KbDeleteRequest):
+    """按 doc_id 批量删除（连带清掉只属于它们的受管上传文件）。
+
+    用 POST + JSON 而不是 ``DELETE /api/kb/documents/{doc_id}``：一次要删的往往是
+    同一个文件拆出来的多篇文档，而按来源路径删又得把 Windows 绝对路径（含冒号、
+    反斜杠）塞进 URL，编码极易出错。
+    """
+    ids = [d.strip() for d in (req.doc_ids or []) if d and d.strip()]
+    if not ids:
+        raise HTTPException(status_code=400, detail="doc_ids 不能为空")
+    result = kb_delete_documents(ids)
+    if not result["removed"]:
+        raise HTTPException(
+            status_code=404,
+            detail=f"文档不存在：{'、'.join(result['missing']) or '（空）'}",
+        )
+    result["list"] = _kb_doc_payload()     # 顺手带回最新列表，省一次往返
+    return result
+
 
 # --- Static Files ---
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

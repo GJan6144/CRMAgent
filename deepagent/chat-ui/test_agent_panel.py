@@ -208,8 +208,11 @@ s = r.get("summary", {})
 check("A7.1 恢复默认后无禁用工具", s.get("disabled_tools") == [], str(s.get("disabled_tools")))
 check("A7.2 恢复默认后 deny 为 crm_delete/delete",
       set(s.get("deny_tools") or []) == {"crm_delete", "delete"}, str(s.get("deny_tools")))
-check("A7.3 恢复默认后 approval 含 crm_create/crm_update/write_file/edit_file",
-      set(s.get("approval_tools") or []) == {"crm_create", "crm_update", "write_file", "edit_file"},
+check("A7.3 恢复默认后 approval 含 CRM 写入 / 文件写入 / 知识库写入",
+      set(s.get("approval_tools") or []) == {
+          "crm_create", "crm_update", "write_file", "edit_file",
+          "kb_ingest", "kb_delete_document",
+      },
       str(s.get("approval_tools")))
 
 # ==========================================================================

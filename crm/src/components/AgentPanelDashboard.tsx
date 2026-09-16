@@ -2,11 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Sidebar from "./Sidebar";
+import Modal from "./Modal";
 import { usePermission } from "@/hooks/usePermission";
 import type {
   PanelConfig,
   PanelModelCheck,
   PanelOverview,
+  PanelSkill,
+  PanelSkillContent,
+  PanelSkillsResponse,
   PanelTool,
   ToolPolicy,
 } from "@/types/agent";
@@ -259,13 +263,52 @@ function fmtLatency(ms: number): { value: string; unit: string } {
   return { value: v.toFixed(1), unit: "ms" };
 }
 
+/** 文件大小：字节数不大时直接用 B，避免满屏 0.0 KB */
+function fmtBytes(n: number): string {
+  const v = n ?? 0;
+  if (v < 1024) return `${v} B`;
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
+  return `${(v / 1024 / 1024).toFixed(2)} MB`;
+}
+
+/** ISO 时间 → `MM-DD HH:mm`（面板里都是近期文件，年份是噪音） */
+function fmtTime(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso.replace("T", " ").slice(0, 16);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** 技能来源标签的配色：内置的用琥珀色（改动会被框架升级覆盖），其余按项目内/外分色 */
+const SOURCE_TONE: Record<string, "gray" | "blue" | "green" | "amber" | "red"> = {
+  "Built-in": "amber",
+  "Chat UI": "blue",
+  "Project Deepagents": "green",
+  "Project Agents": "green",
+  "Project Claude": "green",
+};
+
 /* ============================ 主体 ============================ */
 
 export default function AgentPanelDashboard() {
   const perm = usePermission("agent");
 
-  const [tab, setTab] = useState<"overview" | "config">("overview");
+  const [tab, setTab] = useState<"overview" | "config" | "skills">("overview");
   const [subTab, setSubTab] = useState<"prompt" | "tools" | "policy">("prompt");
+
+  // ---- Skill 管理 ----
+  const [skillsData, setSkillsData] = useState<PanelSkillsResponse | null>(null);
+  const [busySkill, setBusySkill] = useState<string | null>(null);
+  /** 正在编辑的技能（null = 弹窗关闭）；只带定位信息，正文另拉 */
+  const [skillEdit, setSkillEdit] = useState<PanelSkill | null>(null);
+  const [skillContent, setSkillContent] = useState<PanelSkillContent | null>(null);
+  const [skillDraft, setSkillDraft] = useState("");
+  const [skillLoading, setSkillLoading] = useState(false);
+  const [skillSaving, setSkillSaving] = useState(false);
+  /** 保存被拒时的逐条原因（服务端 422 返回的 problems） */
+  const [skillProblems, setSkillProblems] = useState<string[]>([]);
+  const [skillWarnings, setSkillWarnings] = useState<string[]>([]);
 
   const [overview, setOverview] = useState<PanelOverview | null>(null);
   const [config, setConfig] = useState<PanelConfig | null>(null);
@@ -337,12 +380,24 @@ export default function AgentPanelDashboard() {
     [flash]
   );
 
+  const loadSkills = useCallback(async () => {
+    try {
+      const res = await fetch("/api/agent/panel/skills", { cache: "no-store" });
+      if (!res.ok) throw new Error(String(res.status));
+      setSkillsData((await res.json()) as PanelSkillsResponse);
+      setError("");
+    } catch {
+      setError("无法连接 Agent 服务，请确认 DeepAgents 服务（8765）已启动。");
+    }
+  }, []);
+
   useEffect(() => {
     loadOverview();
     loadConfig();
+    loadSkills();
     // 首次进入即做一次模型连通性探测（服务端有 20s 缓存，不会重复打模型）
     runModelCheck(false);
-  }, [loadOverview, loadConfig, runModelCheck]);
+  }, [loadOverview, loadConfig, loadSkills, runModelCheck]);
 
   /* ---------------- 配置操作 ---------------- */
 
@@ -460,6 +515,118 @@ export default function AgentPanelDashboard() {
     }
   }, [flash, loadOverview]);
 
+  /* ---------------- Skill 管理操作 ---------------- */
+
+  const toggleSkill = useCallback(
+    async (name: string, enabled: boolean) => {
+      setBusySkill(name);
+      try {
+        const res = await fetch(`/api/agent/panel/skills/${encodeURIComponent(name)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled }),
+        });
+        if (!res.ok) throw new Error(String(res.status));
+        const body = await res.json().catch(() => null);
+        // 局部更新，避免整页重拉（技能清单是扫盘来的，重拉会闪一下）
+        setSkillsData((prev) =>
+          prev
+            ? {
+                ...prev,
+                skills: prev.skills.map((s) => (s.name === name ? { ...s, enabled } : s)),
+                summary: body?.summary ?? prev.summary,
+              }
+            : prev
+        );
+        flash(`技能「${name}」已${enabled ? "开启" : "关闭"}，下一轮对话生效`);
+      } catch {
+        flash("操作失败，请重试");
+        loadSkills();
+      } finally {
+        setBusySkill(null);
+      }
+    },
+    [flash, loadSkills]
+  );
+
+  const openSkillEditor = useCallback(
+    async (skill: PanelSkill) => {
+      setSkillEdit(skill);
+      setSkillContent(null);
+      setSkillDraft("");
+      setSkillProblems([]);
+      setSkillWarnings([]);
+      setSkillLoading(true);
+      try {
+        const res = await fetch(
+          `/api/agent/panel/skills/${encodeURIComponent(skill.name)}/content`,
+          { cache: "no-store" }
+        );
+        if (!res.ok) throw new Error(String(res.status));
+        const data = (await res.json()) as PanelSkillContent;
+        setSkillContent(data);
+        setSkillDraft(data.content);
+        setSkillWarnings(data.warnings ?? []);
+      } catch {
+        flash("读取 SKILL.md 失败");
+        setSkillEdit(null);
+      } finally {
+        setSkillLoading(false);
+      }
+    },
+    [flash]
+  );
+
+  const saveSkillContent = useCallback(async () => {
+    if (!skillEdit) return;
+    setSkillSaving(true);
+    setSkillProblems([]);
+    try {
+      const res = await fetch(
+        `/api/agent/panel/skills/${encodeURIComponent(skillEdit.name)}/content`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: skillDraft }),
+        }
+      );
+      if (res.status === 422) {
+        const e = await res.json().catch(() => null);
+        const detail = e?.detail;
+        setSkillProblems(
+          Array.isArray(detail?.problems) ? detail.problems : [detail?.message || "内容不合法"]
+        );
+        flash("保存被拒绝：请按提示修正 SKILL.md");
+        return;
+      }
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(typeof e.detail === "string" ? e.detail : String(res.status));
+      }
+      const body = await res.json().catch(() => null);
+      setSkillWarnings(body?.warnings ?? []);
+      setSkillContent((prev) => (prev ? { ...prev, content: skillDraft } : prev));
+      // 列表里的简介/大小/校验状态都可能变了 —— 用服务端返回的最新条目替换
+      if (body?.skill) {
+        const fresh = body.skill as PanelSkill;
+        setSkillsData((prev) =>
+          prev
+            ? {
+                ...prev,
+                skills: prev.skills.map((s) => (s.name === fresh.name ? fresh : s)),
+                summary: body.summary ?? prev.summary,
+              }
+            : prev
+        );
+      }
+      flash(`SKILL.md 已保存（旧版本已备份），下一轮对话生效`);
+    } catch (e) {
+      flash(e instanceof Error ? `保存失败：${e.message}` : "保存失败");
+    } finally {
+      setSkillSaving(false);
+    }
+  }, [skillEdit, skillDraft, flash]);
+
   /* ---------------- 派生数据 ---------------- */
 
   const grouped = useMemo(() => {
@@ -539,7 +706,7 @@ export default function AgentPanelDashboard() {
               Agent 控制面板
             </h1>
             <p style={{ fontSize: 13, color: MUTED, marginTop: 4, margin: 0 }}>
-              查看 Agent 运行状态与能力，并配置系统提示词、可用工具与工具权限
+              查看 Agent 运行状态与能力，并配置系统提示词、可用工具、工具权限与技能
             </p>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
@@ -547,6 +714,7 @@ export default function AgentPanelDashboard() {
               onClick={() => {
                 loadOverview();
                 loadConfig();
+                loadSkills();
                 runModelCheck(true);
               }}
               disabled={loading}
@@ -643,6 +811,16 @@ export default function AgentPanelDashboard() {
           </button>
           <button style={tabButton(tab === "config")} onClick={() => setTab("config")}>
             Agent 配置
+          </button>
+          <button
+            data-testid="tab-skills"
+            style={tabButton(tab === "skills")}
+            onClick={() => {
+              setTab("skills");
+              loadSkills();
+            }}
+          >
+            Skill 管理
           </button>
         </div>
 
@@ -1163,7 +1341,402 @@ export default function AgentPanelDashboard() {
             )}
           </>
         )}
+
+        {/* ==================== Skill 管理 ==================== */}
+        {tab === "skills" && (
+          <>
+            {/* 汇总条 */}
+            <div
+              style={{
+                ...CARD,
+                padding: "12px 18px",
+                marginBottom: 14,
+                display: "flex",
+                gap: 18,
+                alignItems: "center",
+                flexWrap: "wrap",
+              }}
+            >
+              <span style={{ fontSize: 12.5, color: MUTED }}>
+                共 <b style={{ color: TEXT }}>{skillsData?.summary.total ?? 0}</b> 个技能 ·
+                已开启{" "}
+                <b style={{ color: "#059669" }}>{skillsData?.summary.enabled ?? 0}</b> · 已关闭{" "}
+                <b style={{ color: "#DC2626" }}>{skillsData?.summary.disabled ?? 0}</b>
+                {skillsData && skillsData.summary.invalid > 0 ? (
+                  <>
+                    {" "}
+                    · 格式异常 <b style={{ color: "#B45309" }}>{skillsData.summary.invalid}</b>
+                  </>
+                ) : null}
+              </span>
+              <span style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {(skillsData?.summary.sources ?? []).map((s) => (
+                  <Tag key={s.label} tone={SOURCE_TONE[s.label] ?? "gray"}>
+                    {s.label} {s.count}
+                  </Tag>
+                ))}
+              </span>
+              <span style={{ fontSize: 11.5, color: SUBTLE }}>
+                关闭后 Agent 不再加载该技能，读取其 SKILL.md 也会被拦截；改动在下一轮对话生效
+              </span>
+            </div>
+
+            {skillsData && skillsData.summary.orphan_disabled.length > 0 ? (
+              <div
+                style={{
+                  ...CARD,
+                  padding: "11px 16px",
+                  marginBottom: 14,
+                  background: "#FFFBEB",
+                  borderColor: "#FDE68A",
+                  fontSize: 12,
+                  color: "#B45309",
+                }}
+              >
+                配置里记录了已关闭、但磁盘上已不存在的技能：
+                {skillsData.summary.orphan_disabled.map((n) => (
+                  <code key={n} style={{ marginLeft: 6 }}>
+                    {n}
+                  </code>
+                ))}
+                （无害，点「恢复默认」可清理）
+              </div>
+            ) : null}
+
+            <Card style={{ overflow: "hidden" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ background: "#F8FAFC" }}>
+                    {["技能", "来源", "文件", "状态", "操作"].map((h) => (
+                      <th
+                        key={h}
+                        style={{
+                          textAlign: "left",
+                          padding: "11px 16px",
+                          fontSize: 12,
+                          fontWeight: 700,
+                          color: MUTED,
+                          borderBottom: `1px solid ${BORDER}`,
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {(skillsData?.skills ?? []).map((s) => (
+                    <tr
+                      key={s.name}
+                      data-testid={`skill-row-${s.name}`}
+                      style={{ borderBottom: "1px solid #F1F5F9" }}
+                    >
+                      {/* 技能名称 + 功能简介 */}
+                      <td style={{ padding: "12px 16px", verticalAlign: "top", maxWidth: 460 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <code
+                            style={{
+                              fontSize: 12.5,
+                              fontWeight: 700,
+                              color: TEXT,
+                              background: "#F1F5F9",
+                              padding: "2px 7px",
+                              borderRadius: 5,
+                            }}
+                          >
+                            {s.name}
+                          </code>
+                          {s.builtin ? <Tag tone="amber">内置</Tag> : null}
+                          {!s.valid ? <Tag tone="red">格式异常</Tag> : null}
+                          {!s.enabled ? <Tag tone="gray">已关闭</Tag> : null}
+                        </div>
+                        <div
+                          style={{
+                            fontSize: 11.5,
+                            color: s.valid ? SUBTLE : "#B45309",
+                            marginTop: 5,
+                            lineHeight: 1.6,
+                          }}
+                        >
+                          {s.problems.length > 0
+                            ? s.problems[0]
+                            : s.description || "（frontmatter 里没有 description）"}
+                        </div>
+                      </td>
+
+                      {/* 来源 */}
+                      <td style={{ padding: "12px 16px", verticalAlign: "top", whiteSpace: "nowrap" }}>
+                        <Tag tone={SOURCE_TONE[s.source] ?? "gray"}>{s.source}</Tag>
+                        <div style={{ fontSize: 11, color: SUBTLE, marginTop: 5 }}>{s.source_path}</div>
+                      </td>
+
+                      {/* 文件信息 */}
+                      <td
+                        style={{
+                          padding: "12px 16px",
+                          verticalAlign: "top",
+                          fontSize: 11.5,
+                          color: MUTED,
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        <div>{fmtBytes(s.size)}</div>
+                        <div style={{ color: SUBTLE, marginTop: 4 }}>{fmtTime(s.mtime)}</div>
+                        <div style={{ color: SUBTLE, marginTop: 4 }}>
+                          {fmtNum(s.lines)} 行
+                          {s.extra_files > 0 ? ` · +${s.extra_files} 附属文件` : ""}
+                        </div>
+                      </td>
+
+                      {/* 状态 */}
+                      <td style={{ padding: "12px 16px", verticalAlign: "top", whiteSpace: "nowrap" }}>
+                        <span
+                          style={{
+                            fontSize: 11.5,
+                            fontWeight: 600,
+                            color: s.enabled ? "#059669" : SUBTLE,
+                          }}
+                        >
+                          {s.enabled ? "开启" : "关闭"}
+                        </span>
+                      </td>
+
+                      {/* 操作：开关 + 编辑 */}
+                      <td style={{ padding: "12px 16px", verticalAlign: "top" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                          <Switch
+                            checked={s.enabled}
+                            disabled={busySkill === s.name}
+                            onChange={(v) => toggleSkill(s.name, v)}
+                          />
+                          <button
+                            type="button"
+                            data-testid="skill-edit"
+                            onClick={() => openSkillEditor(s)}
+                            style={{
+                              padding: "5px 11px",
+                              borderRadius: 8,
+                              fontSize: 12,
+                              fontWeight: 600,
+                              fontFamily: "inherit",
+                              cursor: "pointer",
+                              border: `1px solid ${BORDER}`,
+                              background: "#fff",
+                              color: TEXT,
+                            }}
+                          >
+                            编辑
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {skillsData && skillsData.skills.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} style={{ padding: 32, textAlign: "center", color: SUBTLE, fontSize: 13 }}>
+                        没有扫描到任何技能。技能目录里放一个含 SKILL.md 的子目录即可新增。
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </Card>
+
+            <div style={{ fontSize: 11.5, color: SUBTLE, marginTop: 12, lineHeight: 1.7 }}>
+              技能清单由服务端<b>实时扫盘</b>得到（左上角汇总的来源目录）—— 往目录里放一个含
+              SKILL.md 的子目录就多一个技能，本页不提供新增 / 删除。
+              <br />
+              本页只能「开关」和「改 SKILL.md 原文」：技能名必须等于目录名，
+              frontmatter 必填 name 与 description，不满足会被框架<b>静默跳过</b>
+              （所以保存前会先校验并拦下来）。改之前会自动备份，历史副本在{" "}
+              <code>{skillsData?.backup_dir ?? "chat-ui/_skill_backups"}</code>。
+            </div>
+          </>
+        )}
       </main>
+
+      {/* ==================== 编辑 SKILL.md 弹窗 ==================== */}
+      <Modal
+        open={!!skillEdit}
+        onClose={() => {
+          setSkillEdit(null);
+          setSkillContent(null);
+          setSkillDraft("");
+          setSkillProblems([]);
+          setSkillWarnings([]);
+        }}
+        title={skillEdit ? `编辑 SKILL.md — ${skillEdit.name}` : "编辑 SKILL.md"}
+        width="860px"
+      >
+        {skillEdit ? (
+          <div>
+            <div
+              style={{
+                display: "flex",
+                gap: 8,
+                alignItems: "center",
+                flexWrap: "wrap",
+                marginBottom: 12,
+              }}
+            >
+              <Tag tone={SOURCE_TONE[skillEdit.source] ?? "gray"}>{skillEdit.source}</Tag>
+              {skillEdit.builtin ? <Tag tone="amber">内置技能，框架升级可能覆盖</Tag> : null}
+              <code style={{ fontSize: 11, color: MUTED, background: "#F1F5F9", padding: "2px 6px", borderRadius: 5 }}>
+                {skillEdit.virtual_path}
+              </code>
+              <span style={{ fontSize: 11.5, color: SUBTLE }}>
+                {fmtBytes(skillDraft.length)} · {fmtNum(skillDraft.split("\n").length)} 行
+              </span>
+            </div>
+
+            {skillProblems.length > 0 ? (
+              <div
+                data-testid="skill-problems"
+                style={{
+                  marginBottom: 12,
+                  padding: "10px 14px",
+                  borderRadius: 10,
+                  background: "#FEF2F2",
+                  border: "1px solid #FECACA",
+                  color: "#B91C1C",
+                  fontSize: 12.5,
+                  lineHeight: 1.7,
+                }}
+              >
+                <b>保存被拒绝 —— 按下面几条改完再存（框架会静默跳过不合规的技能）：</b>
+                <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                  {skillProblems.map((p) => (
+                    <li key={p}>{p}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
+            {skillWarnings.length > 0 ? (
+              <div
+                data-testid="skill-warnings"
+                style={{
+                  marginBottom: 12,
+                  padding: "10px 14px",
+                  borderRadius: 10,
+                  background: "#FFFBEB",
+                  border: "1px solid #FDE68A",
+                  color: "#B45309",
+                  fontSize: 12.5,
+                  lineHeight: 1.7,
+                }}
+              >
+                <b>提醒（不阻塞保存）：</b>
+                <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                  {skillWarnings.map((w) => (
+                    <li key={w}>{w}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
+            {skillLoading ? (
+              <div style={{ padding: 40, textAlign: "center", color: SUBTLE, fontSize: 13 }}>
+                正在读取 SKILL.md…
+              </div>
+            ) : (
+              <textarea
+                data-testid="skill-editor"
+                value={skillDraft}
+                onChange={(e) => setSkillDraft(e.target.value)}
+                spellCheck={false}
+                style={{
+                  width: "100%",
+                  minHeight: 380,
+                  padding: "14px 16px",
+                  borderRadius: 10,
+                  border: `1px solid ${BORDER}`,
+                  fontSize: 12.5,
+                  lineHeight: 1.75,
+                  fontFamily:
+                    "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace",
+                  color: "#1E293B",
+                  background: "#FCFDFE",
+                  outline: "none",
+                  resize: "vertical",
+                  boxSizing: "border-box",
+                }}
+              />
+            )}
+
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginTop: 14,
+                gap: 12,
+                flexWrap: "wrap",
+              }}
+            >
+              <span style={{ fontSize: 11.5, color: SUBTLE }}>
+                保存前会自动备份旧版本；改动对下一轮对话生效（技能每轮重新加载）
+              </span>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSkillEdit(null);
+                    setSkillContent(null);
+                    setSkillProblems([]);
+                    setSkillWarnings([]);
+                  }}
+                  style={{
+                    padding: "9px 16px",
+                    borderRadius: 10,
+                    fontWeight: 600,
+                    fontSize: 13,
+                    border: `1px solid ${BORDER}`,
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                    background: "#fff",
+                    color: MUTED,
+                  }}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  data-testid="skill-save"
+                  onClick={saveSkillContent}
+                  disabled={
+                    skillSaving ||
+                    skillLoading ||
+                    !skillDraft.trim() ||
+                    (skillContent !== null && skillDraft === skillContent.content)
+                  }
+                  style={{
+                    padding: "9px 18px",
+                    borderRadius: 10,
+                    fontWeight: 600,
+                    fontSize: 13,
+                    border: "none",
+                    fontFamily: "inherit",
+                    background: PRIMARY,
+                    color: "#fff",
+                    cursor: skillSaving || skillLoading ? "not-allowed" : "pointer",
+                    opacity:
+                      skillSaving ||
+                      skillLoading ||
+                      !skillDraft.trim() ||
+                      (skillContent !== null && skillDraft === skillContent.content)
+                        ? 0.55
+                        : 1,
+                  }}
+                >
+                  {skillSaving ? "保存中…" : "保存"}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </Modal>
     </div>
   );
 }

@@ -17,6 +17,9 @@
    - ``policy="allow"``    → 直接使用；
    - ``policy="approval"`` → 人工审批通过后才执行；
    - ``policy="deny"``     → 禁止执行（调用即被拦截，前端弹出「禁止」提示）。
+3) ``skills`` —— 每个技能的 ``{enabled}``。技能**目录不在这里登记**（技能是扫盘
+   发现的，见 ``skills_admin.py``），本键只存「被显式关掉/打开过」的那些名字：
+   ``enabled=False`` → 该技能不进入系统提示词，且读取其 SKILL.md 会被拦截。
 
 默认策略与改造前的硬编码行为完全一致：
   查询类 → allow；CRM / 文件写入类 → approval；删除类 → deny。
@@ -25,6 +28,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -46,7 +50,9 @@ POLICY_LABELS: dict[str, str] = {
 }
 
 # 面板中工具分组展示顺序
-CATEGORY_ORDER: list[str] = ["CRM 业务数据", "通用能力", "文件系统与 Shell", "智能体协作"]
+CATEGORY_ORDER: list[str] = [
+    "CRM 业务数据", "知识库", "通用能力", "结果展示", "文件系统与 Shell", "智能体协作"
+]
 
 
 def _t(name: str, label: str, category: str, desc: str, policy: str = POLICY_ALLOW) -> dict:
@@ -83,6 +89,16 @@ TOOL_CATALOG: list[dict] = [
     _t("crm_delete", "删除 CRM 数据", "CRM 业务数据",
        "删除业务记录（拦截桩，调用必被拒绝）", POLICY_DENY),
 
+    # ---------------- 知识库 ----------------
+    _t("kb_search", "检索知识库", "知识库",
+       "按语义检索本地知识库中的文档片段（向量检索）"),
+    _t("kb_list_documents", "查看知识库文档", "知识库",
+       "列出知识库全部文档、分块数与标签"),
+    _t("kb_ingest", "导入知识库", "知识库",
+       "把文件或目录切块向量化后存入知识库（消耗 Embedding 额度）", POLICY_APPROVAL),
+    _t("kb_delete_document", "删除知识库文档", "知识库",
+       "从知识库中移除一篇文档及其全部片段", POLICY_APPROVAL),
+
     # ---------------- 通用能力 ----------------
     _t("get_project_info", "读取项目信息", "通用能力", "获取项目结构与版本信息"),
     _t("get_current_time", "查询时间", "通用能力", "获取当前日期时间（支持时区）"),
@@ -91,6 +107,10 @@ TOOL_CATALOG: list[dict] = [
     _t("get_weather", "查询天气", "通用能力", "查询指定城市的天气预报"),
     _t("store_memory", "写入记忆", "通用能力", "保存一条跨会话长期记忆"),
     _t("recall_memory", "读取记忆", "通用能力", "读取已保存的长期记忆"),
+
+    # ---------------- 结果展示 ----------------
+    _t("render_card", "展示数据卡片", "结果展示",
+       "把分析结果以结构化数据卡片展示在对话流中（可随消息保存）"),
 
     # ---------------- 文件系统与 Shell ----------------
     _t("ls", "浏览目录", "文件系统与 Shell", "列出目录内容"),
@@ -117,6 +137,24 @@ class UnknownToolError(ValueError):
 
 
 # --------------------------------------------------------------------------
+# 技能（Skill）开关
+# --------------------------------------------------------------------------
+# 技能与工具的关键差别：工具目录是**静态清单**（TOOL_CATALOG），技能是**扫盘
+# 发现**的（谁在 skills 目录里放了 SKILL.md 谁就是技能）。所以这里不做目录校验，
+# 只存「显式改过开关」的名字，其余一律按默认「开启」处理；技能被删掉后遗留的
+# 开关记录无害，而且如果同名技能再被加回来，开关会自动重新生效。
+#
+# 名字仍需做**形状**校验：它来自 URL 路径参数，虽然从不参与拼路径（查找永远走
+# 扫盘结果），但挡掉空串 / 路径分隔符 / 控制字符能避免脏数据写进配置文件。
+SKILL_NAME_MAX_LENGTH = 64
+_SKILL_NAME_RE = re.compile(r"^[^\s/\\:*?\"<>|]{1,%d}$" % SKILL_NAME_MAX_LENGTH)
+
+
+class UnknownSkillError(ValueError):
+    """引用了一个名字非法的技能。"""
+
+
+# --------------------------------------------------------------------------
 # 存储
 # --------------------------------------------------------------------------
 
@@ -132,7 +170,7 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def _default_raw() -> dict:
-    return {"system_prompt": None, "tools": {}, "updated_at": None}
+    return {"system_prompt": None, "tools": {}, "skills": {}, "updated_at": None}
 
 
 def _load_raw() -> dict:
@@ -164,6 +202,16 @@ def _load_raw() -> dict:
             if entry:
                 clean[name] = entry
         out["tools"] = clean
+    skills = data.get("skills")
+    if isinstance(skills, dict):
+        clean_skills: dict[str, dict] = {}
+        for name, spec in skills.items():
+            if not isinstance(name, str) or not _SKILL_NAME_RE.match(name):
+                continue  # 忽略目录外的脏数据
+            if not isinstance(spec, dict) or not isinstance(spec.get("enabled"), bool):
+                continue
+            clean_skills[name] = {"enabled": spec["enabled"]}
+        out["skills"] = clean_skills
     out["updated_at"] = data.get("updated_at") if isinstance(data.get("updated_at"), str) else None
     return out
 
@@ -223,6 +271,41 @@ def set_tool_policy(name: str, policy: str) -> dict:
 
 
 # --------------------------------------------------------------------------
+# 技能设置读写
+# --------------------------------------------------------------------------
+
+def get_skill_enabled(name: str, default: bool = True) -> bool:
+    """单个技能的有效开关（未设置过 → ``default``）。"""
+    with _LOCK:
+        raw = _load_raw()
+    spec = raw["skills"].get(name) or {}
+    return bool(spec.get("enabled", default))
+
+
+def get_skill_overrides() -> dict[str, bool]:
+    """**只**返回被显式设置过的技能开关（未出现 = 默认开启）。"""
+    with _LOCK:
+        raw = _load_raw()
+    return {n: bool(s.get("enabled", True)) for n, s in raw["skills"].items()}
+
+
+def set_skill_enabled(name: str, enabled: bool) -> None:
+    if not isinstance(name, str) or not _SKILL_NAME_RE.match(name):
+        raise UnknownSkillError(f"非法技能名「{name}」")
+    if not isinstance(enabled, bool):
+        raise ValueError("enabled 必须是布尔值")
+    with _LOCK:
+        raw = _load_raw()
+        if enabled:
+            # 默认就是开启，写 True 是冗余状态：直接删掉这条记录，
+            # 配置文件只保留「异常状态」，肉眼可读、reset 语义也更干净。
+            raw["skills"].pop(name, None)
+        else:
+            raw["skills"][name] = {"enabled": False}
+        _save_raw(raw)
+
+
+# --------------------------------------------------------------------------
 # 系统提示词读写
 # --------------------------------------------------------------------------
 
@@ -277,6 +360,7 @@ def effective() -> dict:
     deny = [n for n, s in settings.items() if s["policy"] == POLICY_DENY]
     with _LOCK:
         raw = _load_raw()
+    skill_overrides = {n: bool(s.get("enabled", True)) for n, s in raw["skills"].items()}
     return {
         "system_prompt_override": raw["system_prompt"],
         "updated_at": raw["updated_at"],
@@ -285,11 +369,14 @@ def effective() -> dict:
         "disabled_tools": disabled,
         "approval_tools": approval,
         "deny_tools": deny,
+        # 技能：被显式关闭的名字集合（技能清单是扫盘发现的，不在这里）
+        "skill_overrides": skill_overrides,
+        "disabled_skills": sorted(n for n, on in skill_overrides.items() if not on),
     }
 
 
 def reset_all() -> None:
-    """清空所有覆盖，恢复默认（提示词 + 工具开关 + 权限）。"""
+    """清空所有覆盖，恢复默认（提示词 + 工具开关与权限 + 技能开关）。"""
     with _LOCK:
         try:
             if CONFIG_PATH.is_file():
@@ -310,4 +397,7 @@ def summary() -> dict:
         "policy_counts": {
             p: sum(1 for s in eff["settings"].values() if s["policy"] == p) for p in POLICIES
         },
+        # 技能：配置里被关闭的名字（技能总数由 skills_admin 扫盘得出）
+        "disabled_skills": sorted(eff["disabled_skills"]),
+        "skill_override_count": len(eff["skill_overrides"]),
     }

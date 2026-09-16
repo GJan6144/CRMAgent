@@ -36,8 +36,11 @@ async function proxy(request: NextRequest, { params }: { params: Params }) {
   };
 
   if (!["GET", "HEAD"].includes(request.method)) {
-    const body = await request.text();
-    if (body) init.body = body;
+    // 必须按**字节**透传：知识库上传的请求体是文件原始内容（可能是 xlsx 这类
+    // 二进制），先按 UTF-8 解码成字符串会把字节改坏。JSON 请求体走 arrayBuffer
+    // 与走 text 对上游等价，所以这里统一用 arrayBuffer，不区分类型。
+    const body = await request.arrayBuffer();
+    if (body.byteLength > 0) init.body = body;
   }
 
   try {

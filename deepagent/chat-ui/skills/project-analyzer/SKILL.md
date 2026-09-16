@@ -1,8 +1,7 @@
 ---
 name: project-analyzer
 description: Analyze project structure, list files, and read source code to understand a codebase
-compatibility: []
-allowed_tools:
+allowed-tools:
   - ls
   - glob
   - grep

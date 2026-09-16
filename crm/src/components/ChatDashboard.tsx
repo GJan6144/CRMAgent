@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "@/lib/markdown";
+import DataCard from "./DataCard";
 import Modal from "./Modal";
 import Sidebar from "./Sidebar";
 import type {
@@ -9,6 +10,7 @@ import type {
   AgentMessage,
   AgentSession,
   ApprovalRequest,
+  CardPayload,
   ChatMessage,
   ConnectionState,
   ToolActivity,
@@ -772,6 +774,10 @@ export default function ChatDashboard() {
             content: item.content,
             created_at: item.created_at,
           };
+          // 还原落库的数据卡片（刷新页面后仍展示）
+          if (message.role === "assistant" && Array.isArray(item.cards) && item.cards.length > 0) {
+            message.cards = item.cards;
+          }
           list.push(message);
           if (message.role === "assistant") lastAssistant = message;
         }
@@ -1004,6 +1010,17 @@ export default function ChatDashboard() {
                 });
               }
               return { ...m, tools };
+            });
+            break;
+          }
+          case "card": {
+            const card = eventField<CardPayload | null>(event, "card", null);
+            if (!card || !card.card_id || !Array.isArray(card.data?.sections)) break;
+            patch((m) => {
+              const list = m.cards ?? [];
+              // 按 card_id 去重：同一张卡片可能被多个节点重复推送
+              if (list.some((c) => c.card_id === card.card_id)) return m;
+              return { ...m, cards: [...list, card] };
             });
             break;
           }
@@ -1456,23 +1473,40 @@ export default function ChatDashboard() {
                           <ToolList tools={message.tools} />
                         ) : null}
 
-                        <div
-                          style={{
-                            background: "#fff",
-                            border: `1px solid ${BORDER}`,
-                            borderRadius: "4px 12px 12px 12px",
-                            padding: "12px 15px",
-                            boxShadow: "0 1px 2px rgba(15,23,42,0.04)",
-                          }}
-                        >
-                          {message.content ? (
-                            <Markdown content={message.content} />
-                          ) : message.pending ? (
-                            <TypingDots />
-                          ) : (
-                            <span style={{ fontSize: 13, color: SUBTLE }}>（无回复内容）</span>
-                          )}
-                        </div>
+                        {message.content || message.pending || !message.cards?.length ? (
+                          <div
+                            style={{
+                              background: "#fff",
+                              border: `1px solid ${BORDER}`,
+                              borderRadius: "4px 12px 12px 12px",
+                              padding: "12px 15px",
+                              boxShadow: "0 1px 2px rgba(15,23,42,0.04)",
+                            }}
+                          >
+                            {message.content ? (
+                              <Markdown content={message.content} />
+                            ) : message.pending ? (
+                              <TypingDots />
+                            ) : (
+                              <span style={{ fontSize: 13, color: SUBTLE }}>（无回复内容）</span>
+                            )}
+                          </div>
+                        ) : null}
+
+                        {message.cards && message.cards.length > 0 ? (
+                          <div
+                            style={{
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: 10,
+                              marginTop: message.content ? 8 : 0,
+                            }}
+                          >
+                            {message.cards.map((card) => (
+                              <DataCard key={card.card_id} card={card} />
+                            ))}
+                          </div>
+                        ) : null}
 
                         {message.error ? (
                           <div

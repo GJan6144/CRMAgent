@@ -39,7 +39,19 @@ cookies.txt
 # ---- 本地备份 / 验证产物 ----
 _data_backup_*/
 _db_backup*/
-_panel_screenshots/
+_*_screenshots/
+
+# ---- 知识库运行时数据（向量库 + 受管上传文件）----
+kb/files/
+kb_uploads/
+
+# ---- 工具工作目录（本地记忆 / 技能缓存）----
+.workbuddy/
+.deepagents/
+.agents/
+
+# ---- Skill 管理的历史备份 ----
+_skill_backups/
 
 # ---- 编辑器 / 系统 ----
 .DS_Store

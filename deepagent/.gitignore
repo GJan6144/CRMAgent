@@ -261,3 +261,16 @@ chat-ui/agent_state.db
 chat-ui/AGENTS.md
 chat-ui/agent_config.json
 large_tool_results/
+
+# 本地知识库：派生的向量数据（含已入库文档的向量），换机器重新入库即可
+chat-ui/kb/
+
+# 「Skill 管理」改 SKILL.md 前的历史副本（本地便利功能，不进版本库）
+chat-ui/_skill_backups/
+
+# SQLite WAL / SHM 附属文件（跟着 .db 一起长大，从不需要进版本库）
+*.db-wal
+*.db-shm
+
+# 数据库改动前的临时备份目录
+chat-ui/_db_backup_*/

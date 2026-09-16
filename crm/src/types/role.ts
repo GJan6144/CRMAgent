@@ -43,6 +43,7 @@ export const AVAILABLE_PAGES = [
   { key: "communications", label: "沟通记录" },
   { key: "chat", label: "AI 助手" },
   { key: "agent", label: "Agent 控制面板" },
+  { key: "kb", label: "Agent 知识库" },
 ] as const;
 
 /** 可用功能权限 */

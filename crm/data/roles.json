@@ -94,6 +94,16 @@
           "修改"
         ],
         "dataScope": "全部"
+      },
+      {
+        "pageKey": "kb",
+        "pageLabel": "Agent 知识库",
+        "functions": [
+          "查看",
+          "增加",
+          "删除"
+        ],
+        "dataScope": "全部"
       }
     ]
   },
@@ -148,6 +158,14 @@
       {
         "pageKey": "chat",
         "pageLabel": "AI 助手",
+        "functions": [
+          "查看"
+        ],
+        "dataScope": "全部"
+      },
+      {
+        "pageKey": "kb",
+        "pageLabel": "Agent 知识库",
         "functions": [
           "查看"
         ],

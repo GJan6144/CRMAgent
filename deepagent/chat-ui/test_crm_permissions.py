@@ -6,13 +6,18 @@
   删除 → 禁止（crm_delete 作为「拦截桩」暴露给模型：调用必被拦截，推送 tool_blocked
          事件让前端弹出「禁止」提示，数据保持不变）
 
-测试会话在结束时删除；CRM 数据由外层备份/恢复兜底。
+测试会话在结束时删除。CRM 数据由 `crm_data_guard` 在进程退出时**逐字节还原** ——
+这些用例走的是活的 Agent，写入是真写的、删除又被策略禁止，测试自己清不干净。
 """
 import json
 import threading
 import time
 
 import requests
+
+from crm_data_guard import install_guard
+
+install_guard()
 
 BASE = "http://127.0.0.1:8765"
 CRM_LEADS = r"C:\Users\Administrator\Documents\deepagent\CRM_Agent1.0\data\leads.json"
