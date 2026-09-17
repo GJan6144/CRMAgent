@@ -42,6 +42,15 @@ from kb_tools import (  # noqa: E402
     KB_TOOL_NAMES,
 )
 
+# --- Word 文档（.docx）读写工具：读全文 / 列占位符 / 填充模板生成新文档 ---
+from docx_tools import (  # noqa: E402
+    DOCX_TOOLS,
+    DOCX_TOOL_NAMES,
+)
+
+# --- MCP（外部工具服务器）桥接：加载 bing-cn-mcp 等外部工具 ---
+import mcp_tools as mcp_tools  # noqa: E402
+
 # --- 知识库文件上传（前端「Agent 知识库」页：列表 / 上传 / 删除 / 进度）---
 from kb_embeddings import describe as kb_embedding_describe  # noqa: E402
 from kb_store import get_store as kb_get_store  # noqa: E402
@@ -756,6 +765,8 @@ base_tools = [
     # 本地知识库：检索 / 查看 默认放行；导入 / 删除 默认人工审批
     # （导入会调用远程 Embedding 消耗额度，删除会改库文件）
     *KB_TOOLS,
+    # Word 文档读写：读全文 / 列占位符 默认放行；填充模板生成新文件 默认人工审批
+    *DOCX_TOOLS,
 ]
 search_tool = [web_search]
 
@@ -1008,6 +1019,21 @@ SYSTEM_PROMPT = """You are a helpful AI coding assistant. Respond in the same la
   - read (allowed): `kb_search`, `kb_list_documents`
   - write (approval required): `kb_ingest`, `kb_delete_document`
 - Persistent memory at `/chat-ui/AGENTS.md` (already loaded, do not re-read it)
+- `write_todos`: plan and track a multi-step task (the user watches the list live in a panel)
+
+## Task Planning with `write_todos` (IMPORTANT)
+- **A complex, multi-step task MUST be planned with `write_todos` before you start working.**
+  Treat a task as complex when it needs **3 or more distinct steps** — for example: statistics
+  across several entities, an analysis that combines multiple queries, a batch of writes, research
+  from several sources, or "analyze this and then write a report file".
+- Call `write_todos` **once at the very start** to lay out the steps, then call it again every time
+  the status changes: mark the step you are working on `in_progress`, and mark a step `completed`
+  **the moment it is actually finished** — never batch several finished steps and mark them all at
+  the end.
+- **The user watches this list live in a panel at the bottom of the chat.** Keep it truthful:
+  never mark a step `completed` before it is really done, never finish a complex task with steps
+  left `pending`, and never leave a finished step stuck at `in_progress`.
+- For a simple question or a single-step lookup, **do NOT use `write_todos`** — just answer directly.
 
 ## CRM Data Handling (IMPORTANT)
 - CRM business data lives in **local JSON files** and is accessed through the `crm_*` tools.
@@ -1125,6 +1151,14 @@ def build_agent(use_search: bool = False):
     if use_search and eff["settings"].get("web_search", {}).get("enabled", True):
         tools = tools + search_tool
 
+    # 外部 MCP 工具（必应搜索等）：已加载且面板开启的才加入
+    mcp_extra = [
+        t for t in mcp_tools.get_mcp_tools()
+        if eff["settings"].get(t.name, {}).get("enabled", True)
+    ]
+    if mcp_extra:
+        tools = tools + mcp_extra
+
     # 2) 刷新中间件运行时策略
     fs_approval_middleware.refresh(eff)
 
@@ -1184,6 +1218,10 @@ def init_db():
     msg_cols = [row[1] for row in cursor.fetchall()]
     if 'cards' not in msg_cols:
         conn.execute("ALTER TABLE messages ADD COLUMN cards TEXT NOT NULL DEFAULT ''")
+    # Migration: 助手消息携带的任务清单（write_todos 的最终快照），JSON 数组文本。
+    # 为空表示该轮没有清单；历史库自动补列，无需重建。
+    if 'todos' not in msg_cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN todos TEXT NOT NULL DEFAULT ''")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS feedback (
             id TEXT PRIMARY KEY,
@@ -1288,6 +1326,8 @@ class KbDeleteRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # 启动时预加载外部 MCP 工具（bing-cn-mcp 等）；失败自动降级，不阻塞服务
+    await mcp_tools.load_mcp_tools()
     global checkpointer, store
     # Persistent store (semantic/long-term memory) backed by SQLite
     import sqlite3
@@ -1358,10 +1398,10 @@ def get_messages(session_id: str):
     ).fetchall()
     db.close()
 
-    def _cards_of(row) -> list:
-        """解析落库的卡片 JSON；老数据 / 脏数据一律当作没有卡片。"""
+    def _json_list(row, column: str) -> list:
+        """解析落库的 JSON 数组列（cards / todos）；老数据 / 脏数据一律当作空。"""
         try:
-            raw = row["cards"]
+            raw = row[column]
         except (IndexError, KeyError):
             return []
         if not raw:
@@ -1378,7 +1418,8 @@ def get_messages(session_id: str):
             "role": m["role"],
             "content": m["content"],
             "created_at": m["created_at"],
-            "cards": _cards_of(m),
+            "cards": _json_list(m, "cards"),
+            "todos": _json_list(m, "todos"),
         }
         for m in messages
     ]
@@ -1507,6 +1548,20 @@ class SkillEnabledRequest(BaseModel):
 
 class SkillContentRequest(BaseModel):
     content: str
+
+
+class McpEnabledRequest(BaseModel):
+    enabled: bool
+
+
+class McpConfigRequest(BaseModel):
+    config: str
+
+
+class McpAddRequest(BaseModel):
+    name: str
+    description: str = ""
+    config: str
 
 
 def _metric_summary(scope: str = "all") -> dict:
@@ -1827,6 +1882,122 @@ def panel_put_skill_content(name: str, req: SkillContentRequest):
     }
 
 
+# --------------------------------------------------------------------------
+# MCP 管理（面板「MCP 管理」Tab）
+# --------------------------------------------------------------------------
+#   GET    /api/panel/mcps                  MCP 清单（名称 / 介绍 / 传输 / 开关 / 工具 / 加载错误）
+#   POST   /api/panel/mcps                  新增一个 MCP（名称 + 简介 + 完整 JSON 串，保存后关闭）
+#   PUT    /api/panel/mcps/{name}           开 / 关一个 MCP（开启会做错误检查，失败保持关闭）
+#   DELETE /api/panel/mcps/{name}           删除一个 MCP（删除时关闭）
+#   GET    /api/panel/mcps/{name}/config    读完整定义 JSON 原文（编辑弹窗用）
+#   PUT    /api/panel/mcps/{name}/config    存完整定义 JSON（校验 → 保存 → 自动关闭）
+#   POST   /api/panel/mcps/reset            恢复全部 MCP 默认（开关 + 连接配置，清掉自定义）
+#
+# MCP 清单来自持久化注册表（见 mcp_tools.py）：内置种子 + 用户增删改，全部落 mcp_config.json。
+
+def _panel_mcps_payload() -> dict:
+    servers = mcp_tools.get_mcp_servers()
+    total = len(servers)
+    enabled = sum(1 for s in servers if s["enabled"])
+    return {
+        "mcps": servers,
+        "summary": {
+            "total": total,
+            "enabled": enabled,
+            "disabled": total - enabled,
+            "tool_count": sum(s["tool_count"] for s in servers),
+        },
+    }
+
+
+@app.get("/api/panel/mcps")
+def panel_list_mcps():
+    return _panel_mcps_payload()
+
+
+@app.post("/api/panel/mcps")
+def panel_add_mcp(req: McpAddRequest):
+    try:
+        mcp_tools.add_mcp(req.name, req.description, req.config)
+    except mcp_tools.McpNameError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except mcp_tools.McpConfigError as e:
+        raise HTTPException(status_code=422, detail={"message": str(e), "problems": e.problems})
+    payload = _panel_mcps_payload()
+    return {
+        "ok": True,
+        "mcp": next((s for s in payload["mcps"] if s["name"] == req.name.strip()), None),
+        "summary": payload["summary"],
+    }
+
+
+@app.put("/api/panel/mcps/{name}")
+async def panel_set_mcp_enabled(name: str, req: McpEnabledRequest):
+    if not req.enabled:
+        try:
+            mcp_tools.set_mcp_enabled(name, False)
+        except mcp_tools.UnknownMcpError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        result = {"ok": True, "load_error": None}
+    else:
+        try:
+            result = await mcp_tools.enable_mcp(name)
+        except mcp_tools.UnknownMcpError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except mcp_tools.McpConfigError as e:
+            raise HTTPException(status_code=422, detail={"message": str(e), "problems": e.problems})
+    payload = _panel_mcps_payload()
+    return {
+        "ok": True,
+        "mcp": next((s for s in payload["mcps"] if s["name"] == name), None),
+        "summary": payload["summary"],
+        "load_error": result.get("load_error"),
+    }
+
+
+@app.delete("/api/panel/mcps/{name}")
+def panel_delete_mcp(name: str):
+    try:
+        mcp_tools.delete_mcp(name)
+    except mcp_tools.UnknownMcpError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return _panel_mcps_payload()
+
+
+@app.get("/api/panel/mcps/{name}/config")
+def panel_get_mcp_config(name: str):
+    try:
+        text = mcp_tools.get_mcp_config_text(name)
+    except mcp_tools.UnknownMcpError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    meta = next((s for s in mcp_tools.get_mcp_servers() if s["name"] == name), {})
+    return {"name": name, "config": text, "enabled": meta.get("enabled", True)}
+
+
+@app.put("/api/panel/mcps/{name}/config")
+def panel_put_mcp_config(name: str, req: McpConfigRequest):
+    try:
+        mcp_tools.set_mcp_config(name, req.config)
+    except mcp_tools.UnknownMcpError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except mcp_tools.McpConfigError as e:
+        # 422 而非 400：语义是「内容本身不合法，请按 problems 改」
+        raise HTTPException(status_code=422, detail={"message": str(e), "problems": e.problems})
+    payload = _panel_mcps_payload()
+    return {
+        "ok": True,
+        "mcp": next((s for s in payload["mcps"] if s["name"] == name), None),
+        "summary": payload["summary"],
+    }
+
+
+@app.post("/api/panel/mcps/reset")
+async def panel_reset_mcps():
+    mcp_tools.reset_mcp()
+    await mcp_tools.reload_all_mcp()
+    return _panel_mcps_payload()
+
+
 @app.get("/api/context/{session_id}")
 def get_context(session_id: str):
     """Return the current session context: system prompt, conversation history,
@@ -1852,7 +2023,8 @@ def get_context(session_id: str):
     def _tool_meta(t):
         fn = getattr(t, "func", t)
         name = getattr(t, "name", getattr(fn, "__name__", "tool"))
-        desc = (fn.__doc__ or "").strip().split("\n")[0] if fn.__doc__ else ""
+        desc = getattr(t, "description", None) or (fn.__doc__ or "")
+        desc = (desc or "").strip().split("\n")[0]
         spec = eff["settings"].get(name, {})
         return {
             "name": name,
@@ -1862,7 +2034,7 @@ def get_context(session_id: str):
         }
 
     tool_defs = [
-        _tool_meta(t) for t in (base_tools + search_tool)
+        _tool_meta(t) for t in (base_tools + search_tool + mcp_tools.get_mcp_tools())
         if eff["settings"].get(getattr(t, "name", ""), {}).get("enabled", True)
     ]
     # Built-in filesystem/shell tools provided by the backend (informational)
@@ -1973,6 +2145,8 @@ async def chat(req: SendMessageRequest):
         ai_msg_id = None
         # 本轮产出的数据卡片（render_card 工具的 artifact），随助手消息一起落库
         turn_cards: list[dict] = []
+        # 本轮最后的任务清单快照（write_todos 每次回传完整清单，直接整体替换）
+        turn_todos: list[dict] = []
         # 同一 tool_call 可能出现在多个节点输出里，按 id 去重，避免前端重复气泡
         seen_tool_starts: set[str] = set()
         # 卡片同样按 card_id 去重
@@ -2089,6 +2263,11 @@ async def chat(req: SendMessageRequest):
                                     todos_list = tc_args.get("todos", [])
                                     if isinstance(todos_list, list) and todos_list:
                                         yield _emit({"event": "todo", "todos": todos_list, "node": node_name})
+                                        # 落库快照：每次整体替换，存最后一个版本
+                                        turn_todos.clear()
+                                        turn_todos.extend(
+                                            [t for t in todos_list if isinstance(t, dict)]
+                                        )
                         # Tool call finished (ToolMessage)
                         if isinstance(last, ToolMessage):
                             t_status = getattr(last, "status", "success") or "success"
@@ -2141,8 +2320,10 @@ async def chat(req: SendMessageRequest):
             db = get_db()
             # 本轮产出的数据卡片随助手消息一起落库（空则存空串）
             cards_json = json.dumps(turn_cards, ensure_ascii=False) if turn_cards else ""
-            db.execute("INSERT INTO messages (id, session_id, role, content, created_at, cards) VALUES (?, ?, ?, ?, ?, ?)",
-                       (ai_msg_id, req.session_id, "assistant", full_response, now_str, cards_json))
+            # 任务清单同理：存最后一次快照，刷新 / 切会话后前端可还原
+            todos_json = json.dumps(turn_todos, ensure_ascii=False) if turn_todos else ""
+            db.execute("INSERT INTO messages (id, session_id, role, content, created_at, cards, todos) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                       (ai_msg_id, req.session_id, "assistant", full_response, now_str, cards_json, todos_json))
             if full_thinking:
                 # Store thinking as a separate hidden message
                 think_msg_id = str(uuid.uuid4())
@@ -2291,6 +2472,81 @@ def kb_delete_docs(req: KbDeleteRequest):
         )
     result["list"] = _kb_doc_payload()     # 顺手带回最新列表，省一次往返
     return result
+
+
+# --- 生成文件管理（AI 生成的合同 / 报告等产物） ---
+
+GENERATED_SUBDIRS = ("contracts", "reports")
+GENERATED_CATEGORY_LABEL = {"contracts": "合同", "reports": "报告"}
+
+
+def _resolve_generated(path: str):
+    """把相对 static 目录的路径安全解析为真实路径，禁止越出 static 目录。
+
+    返回 Path，或非法 / 越界时返回 None。
+    """
+    raw = (path or "").strip().strip("/").replace("\\", "/")
+    if not raw:
+        return None
+    base = STATIC_DIR.resolve()
+    p = (base / raw).resolve()
+    try:
+        p.relative_to(base)
+    except ValueError:
+        return None
+    return p
+
+
+def _list_generated_files():
+    """扫描产物目录，返回用户可见的生成文件（排除 _ 开头的内部辅助文件）。"""
+    files = []
+    for sub in GENERATED_SUBDIRS:
+        root = STATIC_DIR / sub
+        if not root.is_dir():
+            continue
+        for p in sorted(root.rglob("*")):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(root)
+            if any(part.startswith("_") for part in rel.parts):
+                continue
+            st = p.stat()
+            rel_str = str(rel).replace("\\", "/")
+            files.append({
+                "name": p.name,
+                "path": f"{sub}/{rel_str}",
+                "category": sub,
+                "category_label": GENERATED_CATEGORY_LABEL.get(sub, sub),
+                "size": st.st_size,
+                "mtime": int(st.st_mtime),
+                "url": f"/static/{sub}/{rel_str}",
+            })
+    files.sort(key=lambda x: x["mtime"], reverse=True)
+    return files
+
+
+@app.get("/api/files")
+def list_generated_files():
+    data = _list_generated_files()
+    return {"data": data, "total": len(data)}
+
+
+@app.get("/api/files/download")
+def download_generated_file(path: str = ""):
+    fp = _resolve_generated(path)
+    if not fp or not fp.is_file():
+        raise HTTPException(status_code=404, detail=f"文件不存在：{path}")
+    return FileResponse(str(fp), filename=fp.name)
+
+
+@app.delete("/api/files")
+def delete_generated_file(path: str = ""):
+    fp = _resolve_generated(path)
+    if not fp or not fp.is_file():
+        raise HTTPException(status_code=404, detail=f"文件不存在：{path}")
+    name = fp.name
+    fp.unlink()
+    return {"ok": True, "removed": name}
 
 
 # --- Static Files ---

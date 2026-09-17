@@ -44,6 +44,7 @@ export const AVAILABLE_PAGES = [
   { key: "chat", label: "AI 助手" },
   { key: "agent", label: "Agent 控制面板" },
   { key: "kb", label: "Agent 知识库" },
+  { key: "files", label: "AI 生成文件管理" },
 ] as const;
 
 /** 可用功能权限 */

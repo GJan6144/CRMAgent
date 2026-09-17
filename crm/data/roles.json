@@ -104,6 +104,15 @@
           "删除"
         ],
         "dataScope": "全部"
+      },
+      {
+        "pageKey": "files",
+        "pageLabel": "AI 生成文件管理",
+        "functions": [
+          "查看",
+          "删除"
+        ],
+        "dataScope": "全部"
       }
     ]
   },
@@ -166,6 +175,14 @@
       {
         "pageKey": "kb",
         "pageLabel": "Agent 知识库",
+        "functions": [
+          "查看"
+        ],
+        "dataScope": "全部"
+      },
+      {
+        "pageKey": "files",
+        "pageLabel": "AI 生成文件管理",
         "functions": [
           "查看"
         ],

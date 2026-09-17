@@ -5,10 +5,12 @@ import Markdown from "@/lib/markdown";
 import DataCard from "./DataCard";
 import Modal from "./Modal";
 import Sidebar from "./Sidebar";
+import TodoPanel from "./TodoPanel";
 import type {
   AgentEvent,
   AgentMessage,
   AgentSession,
+  AgentTodo,
   ApprovalRequest,
   CardPayload,
   ChatMessage,
@@ -113,6 +115,24 @@ async function readSSE(response: Response, onEvent: (event: AgentEvent) => void)
 function eventField<T>(event: AgentEvent, key: string, fallback: T): T {
   const value = (event as Record<string, unknown>)[key];
   return (value === undefined || value === null ? fallback : value) as T;
+}
+
+/**
+ * 任务清单归一化：SSE 事件（字段可能缺省）与接口还原（历史数据）共用同一套兜底。
+ * 顺序即执行顺序，保持原样；状态不在白名单内一律按「未开始」处理。
+ */
+function normalizeTodos(raw: unknown): AgentTodo[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((t): t is Record<string, unknown> => !!t && typeof t === "object")
+    .map((t) => ({
+      content: typeof t.content === "string" ? t.content : "",
+      status:
+        t.status === "completed" || t.status === "in_progress"
+          ? (t.status as AgentTodo["status"])
+          : ("pending" as AgentTodo["status"]),
+    }))
+    .filter((t) => t.content !== "");
 }
 
 /* ============================ 子组件 ============================ */
@@ -687,6 +707,11 @@ export default function ChatDashboard() {
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
   const [pendingDelete, setPendingDelete] = useState<AgentSession | null>(null);
   const [listCollapsed, setListCollapsed] = useState(false);
+  /**
+   * 任务清单的展开状态，**按消息 id 记录**（清单挂在消息上，每轮回答各自一份）。
+   * 键不存在 = 收起：历史消息打开就是一行，当前这轮在收到第一份清单时才自动展开。
+   */
+  const [todoCollapsed, setTodoCollapsed] = useState<Record<string, boolean>>({});
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -778,6 +803,11 @@ export default function ChatDashboard() {
           if (message.role === "assistant" && Array.isArray(item.cards) && item.cards.length > 0) {
             message.cards = item.cards;
           }
+          // 还原落库的任务清单（刷新页面后仍展示；缺省收起，点标题栏可展开）
+          if (message.role === "assistant") {
+            const restored = normalizeTodos(item.todos);
+            if (restored.length > 0) message.todos = restored;
+          }
           list.push(message);
           if (message.role === "assistant") lastAssistant = message;
         }
@@ -830,6 +860,8 @@ export default function ChatDashboard() {
     }
     if (sendingRef.current) return;
     stickToBottom.current = true;
+    // 清单随消息走，切会话时把上一会话的展开状态清掉即可（新会话默认全部收起）
+    setTodoCollapsed({});
     void loadMessages(activeId);
   }, [activeId, loadMessages]);
 
@@ -1013,6 +1045,17 @@ export default function ChatDashboard() {
             });
             break;
           }
+          case "todo": {
+            const list = normalizeTodos(eventField<unknown>(event, "todos", []));
+            if (list.length === 0) break;
+            // write_todos 每次回传**完整清单** → 整体替换挂在这条回答上的清单
+            patch((m) => ({ ...m, todos: list }));
+            // 本轮第一份清单到达 → 自动展开；之后不再干扰用户的手动收起
+            setTodoCollapsed((prev) =>
+              aiMsgId in prev ? prev : { ...prev, [aiMsgId]: false }
+            );
+            break;
+          }
           case "card": {
             const card = eventField<CardPayload | null>(event, "card", null);
             if (!card || !card.card_id || !Array.isArray(card.data?.sections)) break;
@@ -1075,6 +1118,8 @@ export default function ChatDashboard() {
       sendingRef.current = false;
       abortRef.current = null;
       setSending(false);
+      // 本轮结束（正常 / 出错 / 用户中断）→ 该条回答的清单自动收起成一行
+      setTodoCollapsed((prev) => ({ ...prev, [aiMsgId]: true }));
     }
   }, [input, activeId, useSearch, createSession, loadSessions, markOffline]);
 
@@ -1473,8 +1518,12 @@ export default function ChatDashboard() {
                           <ToolList tools={message.tools} />
                         ) : null}
 
-                        {message.content || message.pending || !message.cards?.length ? (
+                        {message.content ||
+                        message.pending ||
+                        (message.todos?.length ?? 0) > 0 ||
+                        !message.cards?.length ? (
                           <div
+                            data-answer-card="1"
                             style={{
                               background: "#fff",
                               border: `1px solid ${BORDER}`,
@@ -1487,9 +1536,24 @@ export default function ChatDashboard() {
                               <Markdown content={message.content} />
                             ) : message.pending ? (
                               <TypingDots />
-                            ) : (
+                            ) : (message.todos?.length ?? 0) > 0 ? null : (
                               <span style={{ fontSize: 13, color: SUBTLE }}>（无回复内容）</span>
                             )}
+
+                            {/* 任务清单：嵌在回答框内部的最下方，属于这条回答 */}
+                            {(message.todos?.length ?? 0) > 0 ? (
+                              <TodoPanel
+                                todos={message.todos ?? []}
+                                collapsed={todoCollapsed[message.id] ?? true}
+                                running={!!message.pending}
+                                onToggle={() =>
+                                  setTodoCollapsed((prev) => ({
+                                    ...prev,
+                                    [message.id]: !(prev[message.id] ?? true),
+                                  }))
+                                }
+                              />
+                            ) : null}
                           </div>
                         ) : null}
 

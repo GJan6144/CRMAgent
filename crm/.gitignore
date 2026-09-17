@@ -5,3 +5,13 @@ build/
 *.tsbuildinfo
 .DS_Store
 npm-debug.log*
+
+# 工作区数据（项目记忆 / 本地工具配置）
+.workbuddy/
+
+# 脚本产出的截图目录（_verify_*.cjs 会写）
+_*_screenshots/
+
+# 数据备份（改 data/*.json 前自动打的快照）
+_data_backup_*
+_db_backup_*

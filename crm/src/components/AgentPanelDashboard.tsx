@@ -6,6 +6,9 @@ import Modal from "./Modal";
 import { usePermission } from "@/hooks/usePermission";
 import type {
   PanelConfig,
+  PanelMcp,
+  PanelMcpConfig,
+  PanelMcpsResponse,
   PanelModelCheck,
   PanelOverview,
   PanelSkill,
@@ -294,7 +297,7 @@ const SOURCE_TONE: Record<string, "gray" | "blue" | "green" | "amber" | "red"> =
 export default function AgentPanelDashboard() {
   const perm = usePermission("agent");
 
-  const [tab, setTab] = useState<"overview" | "config" | "skills">("overview");
+  const [tab, setTab] = useState<"overview" | "config" | "skills" | "mcp">("overview");
   const [subTab, setSubTab] = useState<"prompt" | "tools" | "policy">("prompt");
 
   // ---- Skill 管理 ----
@@ -309,6 +312,30 @@ export default function AgentPanelDashboard() {
   /** 保存被拒时的逐条原因（服务端 422 返回的 problems） */
   const [skillProblems, setSkillProblems] = useState<string[]>([]);
   const [skillWarnings, setSkillWarnings] = useState<string[]>([]);
+
+  // ---- MCP 管理 ----
+  const [mcpsData, setMcpsData] = useState<PanelMcpsResponse | null>(null);
+  const [busyMcp, setBusyMcp] = useState<string | null>(null);
+  /** 正在编辑的 MCP（null = 弹窗关闭）；只带定位信息，配置原文另拉 */
+  const [mcpEdit, setMcpEdit] = useState<PanelMcp | null>(null);
+  const [mcpConfigSaved, setMcpConfigSaved] = useState("");
+  const [mcpConfigDraft, setMcpConfigDraft] = useState("");
+  const [mcpLoading, setMcpLoading] = useState(false);
+  const [mcpSaving, setMcpSaving] = useState(false);
+  const [mcpProblems, setMcpProblems] = useState<string[]>([]);
+  const [resettingMcp, setResettingMcp] = useState(false);
+
+  // ---- MCP 新增 ----
+  const [mcpAddOpen, setMcpAddOpen] = useState(false);
+  const [mcpAddName, setMcpAddName] = useState("");
+  const [mcpAddDesc, setMcpAddDesc] = useState("");
+  const [mcpAddJson, setMcpAddJson] = useState("");
+  const [mcpAddProblems, setMcpAddProblems] = useState<string[]>([]);
+  const [mcpAddSaving, setMcpAddSaving] = useState(false);
+
+  // ---- MCP 删除 ----
+  const [mcpDelete, setMcpDelete] = useState<PanelMcp | null>(null);
+  const [mcpDeleting, setMcpDeleting] = useState(false);
 
   const [overview, setOverview] = useState<PanelOverview | null>(null);
   const [config, setConfig] = useState<PanelConfig | null>(null);
@@ -391,13 +418,25 @@ export default function AgentPanelDashboard() {
     }
   }, []);
 
+  const loadMcps = useCallback(async () => {
+    try {
+      const res = await fetch("/api/agent/panel/mcps", { cache: "no-store" });
+      if (!res.ok) throw new Error(String(res.status));
+      setMcpsData((await res.json()) as PanelMcpsResponse);
+      setError("");
+    } catch {
+      setError("无法连接 Agent 服务，请确认 DeepAgents 服务（8765）已启动。");
+    }
+  }, []);
+
   useEffect(() => {
     loadOverview();
     loadConfig();
     loadSkills();
+    loadMcps();
     // 首次进入即做一次模型连通性探测（服务端有 20s 缓存，不会重复打模型）
     runModelCheck(false);
-  }, [loadOverview, loadConfig, loadSkills, runModelCheck]);
+  }, [loadOverview, loadConfig, loadSkills, loadMcps, runModelCheck]);
 
   /* ---------------- 配置操作 ---------------- */
 
@@ -627,6 +666,208 @@ export default function AgentPanelDashboard() {
     }
   }, [skillEdit, skillDraft, flash]);
 
+  /* ---------------- MCP 管理操作 ---------------- */
+
+  const setMcpEnabled = useCallback(
+    async (name: string, enabled: boolean) => {
+      setBusyMcp(name);
+      try {
+        const res = await fetch(`/api/agent/panel/mcps/${encodeURIComponent(name)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled }),
+        });
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          throw new Error(typeof e.detail === "string" ? e.detail : String(res.status));
+        }
+        const body = await res.json().catch(() => null);
+        // 以服务端返回的最新条目整体替换（开启可能失败，enabled / load_error / tools 都以服务端为准）
+        if (body?.mcp) {
+          const fresh = body.mcp as PanelMcp;
+          setMcpsData((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  mcps: prev.mcps.map((m) => (m.name === name ? fresh : m)),
+                  summary: body.summary ?? prev.summary,
+                }
+              : prev
+          );
+        }
+        if (enabled && body?.load_error) {
+          flash(`启用失败：${body.load_error}`);
+        } else {
+          flash(`MCP「${name}」已${enabled ? "启用" : "关闭"}，下一轮对话生效`);
+        }
+      } catch (e) {
+        flash(e instanceof Error ? `操作失败：${e.message}` : "操作失败，请重试");
+        loadMcps();
+      } finally {
+        setBusyMcp(null);
+      }
+    },
+    [flash, loadMcps]
+  );
+
+  const openMcpEditor = useCallback(
+    async (mcp: PanelMcp) => {
+      setMcpEdit(mcp);
+      setMcpConfigSaved("");
+      setMcpConfigDraft("");
+      setMcpProblems([]);
+      setMcpLoading(true);
+      try {
+        const res = await fetch(
+          `/api/agent/panel/mcps/${encodeURIComponent(mcp.name)}/config`,
+          { cache: "no-store" }
+        );
+        if (!res.ok) throw new Error(String(res.status));
+        const data = (await res.json()) as PanelMcpConfig;
+        setMcpConfigSaved(data.config);
+        setMcpConfigDraft(data.config);
+      } catch {
+        flash("读取 MCP 配置失败");
+        setMcpEdit(null);
+      } finally {
+        setMcpLoading(false);
+      }
+    },
+    [flash]
+  );
+
+  const saveMcpConfig = useCallback(async () => {
+    if (!mcpEdit) return;
+    setMcpSaving(true);
+    setMcpProblems([]);
+    try {
+      const res = await fetch(
+        `/api/agent/panel/mcps/${encodeURIComponent(mcpEdit.name)}/config`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ config: mcpConfigDraft }),
+        }
+      );
+      if (res.status === 422) {
+        const e = await res.json().catch(() => null);
+        const detail = e?.detail;
+        setMcpProblems(
+          Array.isArray(detail?.problems) ? detail.problems : [detail?.message || "配置不合法"]
+        );
+        flash("保存被拒绝：请按提示修正配置");
+        return;
+      }
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(typeof e.detail === "string" ? e.detail : String(res.status));
+      }
+      const body = await res.json().catch(() => null);
+      setMcpConfigSaved(mcpConfigDraft);
+      if (body?.mcp) {
+        const fresh = body.mcp as PanelMcp;
+        setMcpsData((prev) =>
+          prev
+            ? {
+                ...prev,
+                mcps: prev.mcps.map((m) => (m.name === fresh.name ? fresh : m)),
+                summary: body.summary ?? prev.summary,
+              }
+            : prev
+        );
+      }
+      flash("MCP 已保存并自动关闭，点击「初始启用」重新检查后生效");
+    } catch (e) {
+      flash(e instanceof Error ? `保存失败：${e.message}` : "保存失败");
+    } finally {
+      setMcpSaving(false);
+    }
+  }, [mcpEdit, mcpConfigDraft, flash]);
+
+  const resetMcp = useCallback(async () => {
+    setResettingMcp(true);
+    try {
+      const res = await fetch("/api/agent/panel/mcps/reset", { method: "POST" });
+      if (!res.ok) throw new Error(String(res.status));
+      setMcpsData((await res.json()) as PanelMcpsResponse);
+      flash("已恢复全部 MCP 默认配置");
+    } catch {
+      flash("恢复失败");
+    } finally {
+      setResettingMcp(false);
+    }
+  }, [flash]);
+
+  const submitAddMcp = useCallback(async () => {
+    setMcpAddSaving(true);
+    setMcpAddProblems([]);
+    try {
+      const res = await fetch("/api/agent/panel/mcps", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: mcpAddName, description: mcpAddDesc, config: mcpAddJson }),
+      });
+      if (res.status === 422 || res.status === 409) {
+        const e = await res.json().catch(() => null);
+        const detail = e?.detail;
+        setMcpAddProblems(
+          Array.isArray(detail?.problems)
+            ? detail.problems
+            : [typeof detail === "string" ? detail : detail?.message || "内容不合法"]
+        );
+        flash(res.status === 409 ? "添加失败：名称已存在" : "添加被拒绝：请按提示修正");
+        return;
+      }
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(typeof e.detail === "string" ? e.detail : String(res.status));
+      }
+      const body = await res.json().catch(() => null);
+      setMcpsData((prev) =>
+        prev
+          ? {
+              ...prev,
+              mcps: body?.mcp
+                ? [...prev.mcps.filter((m) => m.name !== body.mcp.name), body.mcp]
+                : prev.mcps,
+              summary: body?.summary ?? prev.summary,
+            }
+          : prev
+      );
+      setMcpAddOpen(false);
+      setMcpAddName("");
+      setMcpAddDesc("");
+      setMcpAddJson("");
+      flash("MCP 已添加（默认关闭），点击「初始启用」生效");
+    } catch (e) {
+      flash(e instanceof Error ? `添加失败：${e.message}` : "添加失败");
+    } finally {
+      setMcpAddSaving(false);
+    }
+  }, [mcpAddName, mcpAddDesc, mcpAddJson, flash]);
+
+  const submitDeleteMcp = useCallback(async () => {
+    if (!mcpDelete) return;
+    setMcpDeleting(true);
+    try {
+      const res = await fetch(`/api/agent/panel/mcps/${encodeURIComponent(mcpDelete.name)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(typeof e.detail === "string" ? e.detail : String(res.status));
+      }
+      const body = (await res.json().catch(() => null)) as PanelMcpsResponse | null;
+      if (body) setMcpsData(body);
+      flash(`MCP「${mcpDelete.name}」已删除并关闭`);
+      setMcpDelete(null);
+    } catch (e) {
+      flash(e instanceof Error ? `删除失败：${e.message}` : "删除失败");
+    } finally {
+      setMcpDeleting(false);
+    }
+  }, [mcpDelete, flash]);
+
   /* ---------------- 派生数据 ---------------- */
 
   const grouped = useMemo(() => {
@@ -821,6 +1062,16 @@ export default function AgentPanelDashboard() {
             }}
           >
             Skill 管理
+          </button>
+          <button
+            data-testid="tab-mcp"
+            style={tabButton(tab === "mcp")}
+            onClick={() => {
+              setTab("mcp");
+              loadMcps();
+            }}
+          >
+            MCP 管理
           </button>
         </div>
 
@@ -1554,6 +1805,299 @@ export default function AgentPanelDashboard() {
             </div>
           </>
         )}
+
+        {/* ==================== MCP 管理 ==================== */}
+        {tab === "mcp" && (
+          <>
+            {/* 汇总条 */}
+            <div
+              style={{
+                ...CARD,
+                padding: "12px 18px",
+                marginBottom: 14,
+                display: "flex",
+                gap: 18,
+                alignItems: "center",
+                flexWrap: "wrap",
+              }}
+            >
+              <span style={{ fontSize: 12.5, color: MUTED }}>
+                共 <b style={{ color: TEXT }}>{mcpsData?.summary.total ?? 0}</b> 个 MCP ·
+                已开启 <b style={{ color: "#059669" }}>{mcpsData?.summary.enabled ?? 0}</b> ·
+                已关闭 <b style={{ color: "#DC2626" }}>{mcpsData?.summary.disabled ?? 0}</b> · 提供{" "}
+                <b style={{ color: TEXT }}>{mcpsData?.summary.tool_count ?? 0}</b> 个工具
+              </span>
+              <span style={{ flex: 1 }} />
+              <button
+                type="button"
+                data-testid="mcp-add"
+                onClick={() => {
+                  setMcpAddName("");
+                  setMcpAddDesc("");
+                  setMcpAddJson("");
+                  setMcpAddProblems([]);
+                  setMcpAddOpen(true);
+                }}
+                style={{
+                  padding: "6px 14px",
+                  borderRadius: 8,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  fontFamily: "inherit",
+                  cursor: "pointer",
+                  border: "none",
+                  background: PRIMARY,
+                  color: "#fff",
+                }}
+              >
+                添加 MCP
+              </button>
+              <button
+                type="button"
+                data-testid="mcp-reset"
+                onClick={resetMcp}
+                disabled={resettingMcp}
+                style={{
+                  padding: "6px 12px",
+                  borderRadius: 8,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  fontFamily: "inherit",
+                  cursor: resettingMcp ? "not-allowed" : "pointer",
+                  border: `1px solid ${BORDER}`,
+                  background: "#fff",
+                  color: MUTED,
+                }}
+              >
+                {resettingMcp ? "恢复中…" : "恢复默认"}
+              </button>
+              <span style={{ fontSize: 11.5, color: SUBTLE }}>
+                新增 / 编辑保存后自动关闭，需点「初始启用」重新检查后生效
+              </span>
+            </div>
+
+            <Card style={{ overflow: "hidden" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ background: "#F8FAFC" }}>
+                    {["MCP", "传输", "工具", "状态", "操作"].map((h) => (
+                      <th
+                        key={h}
+                        style={{
+                          textAlign: "left",
+                          padding: "11px 16px",
+                          fontSize: 12,
+                          fontWeight: 700,
+                          color: MUTED,
+                          borderBottom: `1px solid ${BORDER}`,
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {(mcpsData?.mcps ?? []).map((m) => (
+                    <tr
+                      key={m.name}
+                      data-testid={`mcp-row-${m.name}`}
+                      style={{ borderBottom: "1px solid #F1F5F9" }}
+                    >
+                      {/* MCP 名称 + 介绍 */}
+                      <td style={{ padding: "12px 16px", verticalAlign: "top", maxWidth: 440 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <code
+                            style={{
+                              fontSize: 12.5,
+                              fontWeight: 700,
+                              color: TEXT,
+                              background: "#F1F5F9",
+                              padding: "2px 7px",
+                              borderRadius: 5,
+                            }}
+                          >
+                            {m.name}
+                          </code>
+                          <span style={{ fontSize: 13, fontWeight: 600, color: TEXT }}>{m.label}</span>
+                          {m.builtin ? <Tag tone="blue">内置</Tag> : <Tag tone="gray">自定义</Tag>}
+                          {!m.enabled ? <Tag tone="gray">已关闭</Tag> : null}
+                        </div>
+                        <div
+                          style={{
+                            fontSize: 11.5,
+                            color: SUBTLE,
+                            marginTop: 5,
+                            lineHeight: 1.6,
+                          }}
+                        >
+                          {m.description}
+                        </div>
+                        {m.load_error ? (
+                          <div style={{ fontSize: 11.5, color: "#B91C1C", marginTop: 5 }}>
+                            加载失败：{m.load_error}
+                          </div>
+                        ) : null}
+                      </td>
+
+                      {/* 传输类型 */}
+                      <td style={{ padding: "12px 16px", verticalAlign: "top", whiteSpace: "nowrap" }}>
+                        <Tag tone="blue">{m.transport}</Tag>
+                      </td>
+
+                      {/* 工具 */}
+                      <td
+                        style={{
+                          padding: "12px 16px",
+                          verticalAlign: "top",
+                          fontSize: 11.5,
+                          color: MUTED,
+                        }}
+                      >
+                        {m.tools.length > 0 ? (
+                          m.tools.map((t) => (
+                            <code
+                              key={t}
+                              style={{
+                                display: "inline-block",
+                                margin: "0 4px 3px 0",
+                                fontSize: 11,
+                                color: MUTED,
+                                background: "#F1F5F9",
+                                padding: "1px 6px",
+                                borderRadius: 5,
+                              }}
+                            >
+                              {t}
+                            </code>
+                          ))
+                        ) : (
+                          <span style={{ color: SUBTLE }}>—</span>
+                        )}
+                      </td>
+
+                      {/* 状态 */}
+                      <td style={{ padding: "12px 16px", verticalAlign: "top", whiteSpace: "nowrap" }}>
+                        <span
+                          style={{
+                            fontSize: 11.5,
+                            fontWeight: 600,
+                            color: m.enabled ? "#059669" : SUBTLE,
+                          }}
+                        >
+                          {m.enabled ? "开启" : "关闭"}
+                        </span>
+                      </td>
+
+                      {/* 操作：初始启用 / 关闭 + 编辑 + 删除 */}
+                      <td style={{ padding: "12px 16px", verticalAlign: "top" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          {m.enabled ? (
+                            <button
+                              type="button"
+                              data-testid="mcp-disable"
+                              onClick={() => setMcpEnabled(m.name, false)}
+                              disabled={busyMcp === m.name}
+                              style={{
+                                padding: "5px 11px",
+                                borderRadius: 8,
+                                fontSize: 12,
+                                fontWeight: 600,
+                                fontFamily: "inherit",
+                                cursor: busyMcp === m.name ? "not-allowed" : "pointer",
+                                border: `1px solid ${BORDER}`,
+                                background: "#fff",
+                                color: MUTED,
+                              }}
+                            >
+                              {busyMcp === m.name ? "处理中…" : "关闭"}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              data-testid="mcp-enable"
+                              onClick={() => setMcpEnabled(m.name, true)}
+                              disabled={busyMcp === m.name}
+                              style={{
+                                padding: "5px 11px",
+                                borderRadius: 8,
+                                fontSize: 12,
+                                fontWeight: 600,
+                                fontFamily: "inherit",
+                                cursor: busyMcp === m.name ? "not-allowed" : "pointer",
+                                border: "1px solid #A7F3D0",
+                                background: "#ECFDF5",
+                                color: "#059669",
+                              }}
+                            >
+                              {busyMcp === m.name ? "检查中…" : "初始启用"}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            data-testid="mcp-edit"
+                            onClick={() => openMcpEditor(m)}
+                            style={{
+                              padding: "5px 11px",
+                              borderRadius: 8,
+                              fontSize: 12,
+                              fontWeight: 600,
+                              fontFamily: "inherit",
+                              cursor: "pointer",
+                              border: `1px solid ${BORDER}`,
+                              background: "#fff",
+                              color: TEXT,
+                            }}
+                          >
+                            编辑
+                          </button>
+                          <button
+                            type="button"
+                            data-testid="mcp-delete"
+                            onClick={() => setMcpDelete(m)}
+                            style={{
+                              padding: "5px 11px",
+                              borderRadius: 8,
+                              fontSize: 12,
+                              fontWeight: 600,
+                              fontFamily: "inherit",
+                              cursor: "pointer",
+                              border: "1px solid #FECACA",
+                              background: "#FEF2F2",
+                              color: "#DC2626",
+                            }}
+                          >
+                            删除
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {mcpsData && mcpsData.mcps.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={5}
+                        style={{ padding: 32, textAlign: "center", color: SUBTLE, fontSize: 13 }}
+                      >
+                        没有配置任何 MCP 服务器。
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </Card>
+
+            <div style={{ fontSize: 11.5, color: SUBTLE, marginTop: 12, lineHeight: 1.7 }}>
+              MCP（Model Context Protocol）把外部工具服务器桥接给 Agent。新增 / 编辑保存后会自动关闭，
+              点「初始启用」时会重新做错误检查，启动失败则保持关闭并回显错误内容。
+              <br />
+              「编辑」与「添加」都支持粘贴<b>完整 MCP JSON 串</b>（如{" "}
+              <code>{`{"mcpServers":{"name":{"command":"...","args":[...]}}}`}</code> 或
+              含 name / description / config 的完整定义），系统会自动识别并补齐 transport。
+            </div>
+          </>
+        )}
       </main>
 
       {/* ==================== 编辑 SKILL.md 弹窗 ==================== */}
@@ -1733,6 +2277,430 @@ export default function AgentPanelDashboard() {
                   {skillSaving ? "保存中…" : "保存"}
                 </button>
               </div>
+            </div>
+          </div>
+        ) : null}
+      </Modal>
+
+      {/* ==================== 编辑 MCP 配置弹窗 ==================== */}
+      <Modal
+        open={!!mcpEdit}
+        onClose={() => {
+          setMcpEdit(null);
+          setMcpConfigSaved("");
+          setMcpConfigDraft("");
+          setMcpProblems([]);
+        }}
+        title={mcpEdit ? `编辑 MCP 配置 — ${mcpEdit.name}` : "编辑 MCP 配置"}
+        width="760px"
+      >
+        {mcpEdit ? (
+          <div>
+            <div
+              style={{
+                display: "flex",
+                gap: 8,
+                alignItems: "center",
+                flexWrap: "wrap",
+                marginBottom: 12,
+              }}
+            >
+              <Tag tone="blue">{mcpEdit.transport}</Tag>
+              <span style={{ fontSize: 13, fontWeight: 600, color: TEXT }}>{mcpEdit.label}</span>
+              <code
+                style={{
+                  fontSize: 11,
+                  color: MUTED,
+                  background: "#F1F5F9",
+                  padding: "2px 6px",
+                  borderRadius: 5,
+                }}
+              >
+                {mcpEdit.name}
+              </code>
+              <span style={{ fontSize: 11.5, color: SUBTLE }}>{mcpConfigDraft.length} 字符</span>
+            </div>
+
+            {mcpProblems.length > 0 ? (
+              <div
+                data-testid="mcp-problems"
+                style={{
+                  marginBottom: 12,
+                  padding: "10px 14px",
+                  borderRadius: 10,
+                  background: "#FEF2F2",
+                  border: "1px solid #FECACA",
+                  color: "#B91C1C",
+                  fontSize: 12.5,
+                  lineHeight: 1.7,
+                }}
+              >
+                <b>保存被拒绝 —— 请按下面几条改完再存：</b>
+                <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                  {mcpProblems.map((p) => (
+                    <li key={p}>{p}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
+            {mcpLoading ? (
+              <div style={{ padding: 40, textAlign: "center", color: SUBTLE, fontSize: 13 }}>
+                正在读取连接配置…
+              </div>
+            ) : (
+              <textarea
+                data-testid="mcp-editor"
+                value={mcpConfigDraft}
+                onChange={(e) => setMcpConfigDraft(e.target.value)}
+                spellCheck={false}
+                style={{
+                  width: "100%",
+                  minHeight: 300,
+                  padding: "14px 16px",
+                  borderRadius: 10,
+                  border: `1px solid ${BORDER}`,
+                  fontSize: 12.5,
+                  lineHeight: 1.7,
+                  fontFamily:
+                    "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace",
+                  color: "#1E293B",
+                  background: "#FCFDFE",
+                  outline: "none",
+                  resize: "vertical",
+                  boxSizing: "border-box",
+                }}
+              />
+            )}
+
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginTop: 14,
+                gap: 12,
+                flexWrap: "wrap",
+              }}
+            >
+              <span style={{ fontSize: 11.5, color: SUBTLE }}>
+                可粘贴完整 MCP JSON 串（mcpServers 包裹、或含 name / label / description / config
+                的完整定义），系统自动识别并补齐 transport。名称不可改；保存后自动关闭，需点「初始启用」重新检查。
+              </span>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMcpEdit(null);
+                    setMcpConfigSaved("");
+                    setMcpConfigDraft("");
+                    setMcpProblems([]);
+                  }}
+                  style={{
+                    padding: "9px 16px",
+                    borderRadius: 10,
+                    fontWeight: 600,
+                    fontSize: 13,
+                    border: `1px solid ${BORDER}`,
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                    background: "#fff",
+                    color: MUTED,
+                  }}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  data-testid="mcp-save"
+                  onClick={saveMcpConfig}
+                  disabled={
+                    mcpSaving ||
+                    mcpLoading ||
+                    !mcpConfigDraft.trim() ||
+                    mcpConfigDraft === mcpConfigSaved
+                  }
+                  style={{
+                    padding: "9px 18px",
+                    borderRadius: 10,
+                    fontWeight: 600,
+                    fontSize: 13,
+                    border: "none",
+                    fontFamily: "inherit",
+                    background: PRIMARY,
+                    color: "#fff",
+                    cursor: mcpSaving || mcpLoading ? "not-allowed" : "pointer",
+                    opacity:
+                      mcpSaving ||
+                      mcpLoading ||
+                      !mcpConfigDraft.trim() ||
+                      mcpConfigDraft === mcpConfigSaved
+                        ? 0.55
+                        : 1,
+                  }}
+                >
+                  {mcpSaving ? "保存中…" : "保存"}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </Modal>
+
+      {/* ==================== 添加 MCP 弹窗 ==================== */}
+      <Modal
+        open={mcpAddOpen}
+        onClose={() => {
+          if (mcpAddSaving) return;
+          setMcpAddOpen(false);
+          setMcpAddProblems([]);
+        }}
+        title="添加 MCP"
+        width="680px"
+      >
+        <div>
+          {mcpAddProblems.length > 0 ? (
+            <div
+              data-testid="mcp-add-problems"
+              style={{
+                marginBottom: 12,
+                padding: "10px 14px",
+                borderRadius: 10,
+                background: "#FEF2F2",
+                border: "1px solid #FECACA",
+                color: "#B91C1C",
+                fontSize: 12.5,
+                lineHeight: 1.7,
+              }}
+            >
+              <b>添加被拒绝 —— 请按下面几条改完再存：</b>
+              <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                {mcpAddProblems.map((p) => (
+                  <li key={p}>{p}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: TEXT, marginBottom: 6 }}>
+              MCP 名称 <span style={{ color: "#DC2626" }}>*</span>
+            </div>
+            <input
+              data-testid="mcp-add-name"
+              value={mcpAddName}
+              onChange={(e) => setMcpAddName(e.target.value)}
+              placeholder="例如 my-search（字母/数字/下划线/连字符，唯一标识）"
+              style={{
+                width: "100%",
+                padding: "10px 12px",
+                borderRadius: 9,
+                border: `1px solid ${BORDER}`,
+                fontSize: 13,
+                fontFamily: "inherit",
+                color: "#1E293B",
+                background: "#fff",
+                outline: "none",
+                boxSizing: "border-box",
+              }}
+            />
+          </div>
+
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: TEXT, marginBottom: 6 }}>
+              简介 <span style={{ color: SUBTLE, fontWeight: 500 }}>（可选）</span>
+            </div>
+            <textarea
+              data-testid="mcp-add-desc"
+              value={mcpAddDesc}
+              onChange={(e) => setMcpAddDesc(e.target.value)}
+              placeholder="一句话说明这个 MCP 提供什么能力"
+              rows={2}
+              style={{
+                width: "100%",
+                padding: "10px 12px",
+                borderRadius: 9,
+                border: `1px solid ${BORDER}`,
+                fontSize: 13,
+                fontFamily: "inherit",
+                color: "#1E293B",
+                background: "#fff",
+                outline: "none",
+                resize: "vertical",
+                boxSizing: "border-box",
+              }}
+            />
+          </div>
+
+          <div style={{ marginBottom: 6 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: TEXT, marginBottom: 6 }}>
+              完整 JSON 串 <span style={{ color: "#DC2626" }}>*</span>
+            </div>
+            <textarea
+              data-testid="mcp-add-json"
+              value={mcpAddJson}
+              onChange={(e) => setMcpAddJson(e.target.value)}
+              spellCheck={false}
+              placeholder={'{\n  "mcpServers": {\n    "my-search": {\n      "command": "npx",\n      "args": ["-y", "some-mcp"]\n    }\n  }\n}'}
+              style={{
+                width: "100%",
+                minHeight: 200,
+                padding: "12px 14px",
+                borderRadius: 9,
+                border: `1px solid ${BORDER}`,
+                fontSize: 12.5,
+                lineHeight: 1.7,
+                fontFamily:
+                  "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace",
+                color: "#1E293B",
+                background: "#FCFDFE",
+                outline: "none",
+                resize: "vertical",
+                boxSizing: "border-box",
+              }}
+            />
+          </div>
+          <div style={{ fontSize: 11.5, color: SUBTLE, marginBottom: 14, lineHeight: 1.7 }}>
+            支持粘贴完整 MCP JSON 串（标准 mcpServers 包裹、或含 name / label / description / config
+            的完整定义），系统自动识别并补齐 transport。保存后默认「关闭」，需点「初始启用」生效。
+          </div>
+
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "flex-end",
+              gap: 8,
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                setMcpAddOpen(false);
+                setMcpAddProblems([]);
+              }}
+              disabled={mcpAddSaving}
+              style={{
+                padding: "9px 16px",
+                borderRadius: 10,
+                fontWeight: 600,
+                fontSize: 13,
+                border: `1px solid ${BORDER}`,
+                cursor: mcpAddSaving ? "not-allowed" : "pointer",
+                fontFamily: "inherit",
+                background: "#fff",
+                color: MUTED,
+              }}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              data-testid="mcp-add-save"
+              onClick={submitAddMcp}
+              disabled={mcpAddSaving || !mcpAddName.trim() || !mcpAddJson.trim()}
+              style={{
+                padding: "9px 18px",
+                borderRadius: 10,
+                fontWeight: 600,
+                fontSize: 13,
+                border: "none",
+                fontFamily: "inherit",
+                background: PRIMARY,
+                color: "#fff",
+                cursor: mcpAddSaving || !mcpAddName.trim() || !mcpAddJson.trim() ? "not-allowed" : "pointer",
+                opacity: mcpAddSaving || !mcpAddName.trim() || !mcpAddJson.trim() ? 0.55 : 1,
+              }}
+            >
+              {mcpAddSaving ? "保存中…" : "保存"}
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* ==================== 删除 MCP 确认弹窗 ==================== */}
+      <Modal
+        open={!!mcpDelete}
+        onClose={() => {
+          if (mcpDeleting) return;
+          setMcpDelete(null);
+        }}
+        title="删除 MCP"
+        width="460px"
+      >
+        {mcpDelete ? (
+          <div>
+            <div style={{ fontSize: 13, color: TEXT, lineHeight: 1.7 }}>
+              确认删除 MCP{" "}
+              <code
+                style={{
+                  fontSize: 12.5,
+                  fontWeight: 700,
+                  background: "#F1F5F9",
+                  padding: "2px 7px",
+                  borderRadius: 5,
+                  color: TEXT,
+                }}
+              >
+                {mcpDelete.name}
+              </code>
+              {mcpDelete.label ? `（${mcpDelete.label}）` : ""}？删除时会一并关闭该 MCP，
+              其下所有工具将不再提供给 Agent。
+            </div>
+            <div
+              style={{
+                marginTop: 10,
+                padding: "9px 12px",
+                borderRadius: 9,
+                fontSize: 12,
+                lineHeight: 1.6,
+                background: mcpDelete.builtin ? "#FFFBEB" : "#FEF2F2",
+                border: mcpDelete.builtin ? "1px solid #FDE68A" : "1px solid #FECACA",
+                color: mcpDelete.builtin ? "#B45309" : "#B91C1C",
+              }}
+            >
+              {mcpDelete.builtin
+                ? "这是内置 MCP，删除后可通过「恢复默认」找回。"
+                : "这是自定义 MCP，删除后不可恢复，请谨慎操作。"}
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}>
+              <button
+                type="button"
+                onClick={() => setMcpDelete(null)}
+                disabled={mcpDeleting}
+                style={{
+                  padding: "9px 16px",
+                  borderRadius: 10,
+                  fontWeight: 600,
+                  fontSize: 13,
+                  border: `1px solid ${BORDER}`,
+                  cursor: mcpDeleting ? "not-allowed" : "pointer",
+                  fontFamily: "inherit",
+                  background: "#fff",
+                  color: MUTED,
+                }}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                data-testid="mcp-delete-confirm"
+                onClick={submitDeleteMcp}
+                disabled={mcpDeleting}
+                style={{
+                  padding: "9px 18px",
+                  borderRadius: 10,
+                  fontWeight: 600,
+                  fontSize: 13,
+                  border: "none",
+                  fontFamily: "inherit",
+                  background: "#DC2626",
+                  color: "#fff",
+                  cursor: mcpDeleting ? "not-allowed" : "pointer",
+                  opacity: mcpDeleting ? 0.55 : 1,
+                }}
+              >
+                {mcpDeleting ? "删除中…" : "确认删除"}
+              </button>
             </div>
           </div>
         ) : null}

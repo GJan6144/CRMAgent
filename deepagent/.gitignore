@@ -274,3 +274,14 @@ chat-ui/_skill_backups/
 
 # 数据库改动前的临时备份目录
 chat-ui/_db_backup_*/
+
+# 《销售月报》等自动生成的报告产物与 insights 模板（运行时生成，不进版本库）
+chat-ui/static/reports/
+
+# 合同生成等自动生成的 .docx 产物（运行时生成，不进版本库）
+chat-ui/static/contracts/
+
+# 无头浏览器截图 / 探针脚本产物
+chat-ui/_report_screenshots/
+chat-ui/_*_screenshots/
+chat-ui/mcp_config.json

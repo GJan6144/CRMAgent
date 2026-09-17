@@ -582,6 +582,261 @@ async function shoot(cdp, sessionId, file) {
     check("G30 技能总数回到基线", afterOn.summary.total === baselineSkills,
       String(afterOn.summary.total));
 
+    /* ---------- 8f. MCP 管理 ---------- */
+    const apiMcps = () =>
+      evalJS(cdp, sessionId,
+        `fetch('/api/agent/panel/mcps',{cache:'no-store'}).then(r=>r.json())`);
+    const mcpIsOn = (name) =>
+      `fetch('/api/agent/panel/mcps',{cache:'no-store'}).then(r=>r.json()).then(d=>{const m=d.mcps.find(x=>x.name===${JSON.stringify(name)}); return !!(m && m.enabled);})`;
+    const mcpIsOff = (name) =>
+      `fetch('/api/agent/panel/mcps',{cache:'no-store'}).then(r=>r.json()).then(d=>{const m=d.mcps.find(x=>x.name===${JSON.stringify(name)}); return !!(m && !m.enabled);})`;
+
+    // 前置归一化：恢复默认（清掉上一轮残留的自定义 MCP 与覆盖）
+    await evalJS(cdp, sessionId,
+      `fetch('/api/agent/panel/mcps/reset',{method:'POST'}).then(r=>r.json())`);
+    await sleep(600);
+
+    const NODE_EXE = String.raw`C:\Users\Administrator\.workbuddy\binaries\node\versions\22.22.2-3\node.exe`;
+    const BING_ENTRY = String.raw`C:\Users\Administrator\Documents\deepagent\deepagents\chat-ui\mcp_servers\node_modules\bing-cn-mcp\build\index.js`;
+
+    check("H0 可点击「MCP 管理」Tab", await clickByText("MCP 管理"));
+    await waitFor(cdp, sessionId,
+      `document.querySelectorAll('[data-testid^="mcp-row-"]').length > 0`,
+      "MCP 管理页", 20000);
+    await sleep(900);
+
+    const mcpInfo = await evalJS(cdp, sessionId,
+      `(() => {
+        const rows = Array.from(document.querySelectorAll('[data-testid^="mcp-row-"]'));
+        return {
+          rows: rows.length,
+          names: rows.map(r => (r.getAttribute('data-testid')||'').replace('mcp-row-','')),
+          edits: document.querySelectorAll('[data-testid="mcp-edit"]').length,
+          deletes: document.querySelectorAll('[data-testid="mcp-delete"]').length,
+          addBtn: !!document.querySelector('[data-testid="mcp-add"]'),
+          text: document.body.innerText,
+        };
+      })()`);
+    check("H1 MCP 行渲染", mcpInfo.rows >= 1, JSON.stringify({ rows: mcpInfo.rows }));
+    check("H2 bing-search 在列表", mcpInfo.names.includes("bing-search"), JSON.stringify(mcpInfo.names));
+    check("H3 展示名称与介绍",
+      mcpInfo.text.includes("必应中文搜索") && mcpInfo.text.includes("bing-cn-mcp"), "");
+    check("H4 展示传输类型", mcpInfo.text.includes("stdio"), "");
+    check("H5 每行一个编辑按钮", mcpInfo.edits === mcpInfo.rows, JSON.stringify(mcpInfo));
+    check("H6 每行一个删除按钮", mcpInfo.deletes === mcpInfo.rows, JSON.stringify(mcpInfo));
+    check("H7 右上角有「添加 MCP」按钮", mcpInfo.addBtn, "");
+    check("H8 汇总条给计数",
+      /共\s*1\s*个 MCP/.test(mcpInfo.text) && mcpInfo.text.includes("已开启"), "");
+    await shoot(cdp, sessionId, "10-mcp-management.png");
+
+    /* 关闭 → 初始启用（重新错误检查） */
+    const mcpOff = await evalJS(cdp, sessionId,
+      `(() => {
+        const row = document.querySelector('[data-testid="mcp-row-bing-search"]');
+        if (!row) return false;
+        const b = row.querySelector('[data-testid="mcp-disable"]');
+        if (!b) return false;
+        b.click(); return true;
+      })()`);
+    check("H9 可点击「关闭」", mcpOff);
+    await waitFor(cdp, sessionId, mcpIsOff("bing-search"), "关闭落库", 10000);
+    const mcpOffState = await apiMcps();
+    check("H10 关闭已落库",
+      mcpOffState.mcps.find((m) => m.name === "bing-search").enabled === false,
+      JSON.stringify(mcpOffState.mcps.map((m) => m.enabled)));
+    await shoot(cdp, sessionId, "11-mcp-disabled.png");
+
+    // 初始启用（bing 有效，应成功）
+    const mcpOn = await evalJS(cdp, sessionId,
+      `(() => {
+        const row = document.querySelector('[data-testid="mcp-row-bing-search"]');
+        if (!row) return false;
+        const b = row.querySelector('[data-testid="mcp-enable"]');
+        if (!b) return false;
+        b.click(); return true;
+      })()`);
+    check("H11 可点击「初始启用」", mcpOn);
+    await waitFor(cdp, sessionId, mcpIsOn("bing-search"), "初始启用落库", 15000);
+    const mcpOnState = await apiMcps();
+    check("H12 初始启用已落库",
+      mcpOnState.mcps.find((m) => m.name === "bing-search").enabled === true, "");
+
+    /* 编辑弹窗（完整 JSON：name/label/description/config） */
+    const mcpOpen = await evalJS(cdp, sessionId,
+      `(() => {
+        const row = document.querySelector('[data-testid="mcp-row-bing-search"]');
+        if (!row) return false;
+        row.querySelector('[data-testid="mcp-edit"]').click(); return true;
+      })()`);
+    check("H13 可打开 MCP 编辑弹窗", mcpOpen);
+    await waitFor(cdp, sessionId,
+      `(() => { const ta = document.querySelector('[data-testid="mcp-editor"]');
+                return !!ta && ta.value.length > 0; })()`,
+      "MCP 配置加载", 15000);
+    await sleep(700);
+
+    const mcpEditState = await evalJS(cdp, sessionId,
+      `(() => {
+        const ta = document.querySelector('[data-testid="mcp-editor"]');
+        return {
+          title: document.body.innerText.split('\\n').find((l) => l.includes('编辑 MCP 配置')) || '',
+          value: ta ? ta.value : '',
+          saveDisabled: (document.querySelector('[data-testid="mcp-save"]') || {}).disabled,
+        };
+      })()`);
+    check("H14 弹窗标题含 MCP 名", mcpEditState.title.includes("bing-search"), JSON.stringify(mcpEditState.title));
+    check("H15 编辑器载入完整定义 JSON（name/description/config/transport/command）",
+      ["name", "description", "config", "transport", "command"].every((k) => mcpEditState.value.includes(`"${k}"`)), "");
+    check("H16 未修改时保存禁用", mcpEditState.saveDisabled === true, String(mcpEditState.saveDisabled));
+    await shoot(cdp, sessionId, "12-mcp-editor.png");
+
+    /* 校验失败路径 */
+    const setMcpDraft = async (value) => evalJS(cdp, sessionId,
+      `(() => {
+        const ta = document.querySelector('[data-testid="mcp-editor"]');
+        if (!ta) return false;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(ta, ${JSON.stringify(value)});
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()`);
+    await setMcpDraft("{bad json");
+    await sleep(500);
+    check("H17 修改后保存可用", await evalJS(cdp, sessionId,
+      `(document.querySelector('[data-testid="mcp-save"]') || {}).disabled === false`));
+    await evalJS(cdp, sessionId,
+      `(() => { document.querySelector('[data-testid="mcp-save"]').click(); return true; })()`);
+    await waitFor(cdp, sessionId,
+      `!!document.querySelector('[data-testid="mcp-problems"]')`, "校验问题提示", 15000);
+    const mcpProbText = await evalJS(cdp, sessionId,
+      `(document.querySelector('[data-testid="mcp-problems"]') || {}).innerText || ''`);
+    check("H18 非法 JSON 弹出校验问题", mcpProbText.includes("JSON"), mcpProbText.slice(0, 90));
+    check("H19 弹窗保持打开",
+      await evalJS(cdp, sessionId, `!!document.querySelector('[data-testid="mcp-editor"]')`));
+    const stillCfg = await evalJS(cdp, sessionId,
+      `fetch('/api/agent/panel/mcps/bing-search/config',{cache:'no-store'}).then(r=>r.json()).then(d=>d.config)`);
+    check("H20 校验失败时配置未被改动",
+      String(stillCfg).includes('"command"'), String(stillCfg).slice(0, 40));
+    await shoot(cdp, sessionId, "13-mcp-validation.png");
+
+    /* 正常保存：改 description，保存后自动关闭 */
+    const mcpDefaultCfg = await evalJS(cdp, sessionId,
+      `fetch('/api/agent/panel/mcps/bing-search/config',{cache:'no-store'}).then(r=>r.json()).then(d=>d.config)`);
+    const mcpEdited = JSON.parse(mcpDefaultCfg);
+    mcpEdited.description = (mcpEdited.description || "") + " [e2e-edited]";
+    await setMcpDraft(JSON.stringify(mcpEdited, null, 2));
+    await sleep(500);
+    await evalJS(cdp, sessionId,
+      `(() => { document.querySelector('[data-testid="mcp-save"]').click(); return true; })()`);
+    await waitFor(cdp, sessionId,
+      `!document.querySelector('[data-testid="mcp-problems"]') &&
+       document.body.innerText.includes('已保存并自动关闭')`,
+      "保存成功提示", 15000);
+    await sleep(1200);
+    const savedCfg = await evalJS(cdp, sessionId,
+      `fetch('/api/agent/panel/mcps/bing-search/config',{cache:'no-store'}).then(r=>r.json()).then(d=>d.config)`);
+    check("H21 保存已落库（回读含 e2e-edited）", String(savedCfg).includes("[e2e-edited]"), String(savedCfg).slice(-60));
+
+    // 关闭弹窗；保存后应自动关闭 → 行内出现「初始启用」按钮
+    check("H22 可关闭弹窗（取消）", await clickByText("取消"));
+    await sleep(600);
+    const mcpAfterEdit = await apiMcps();
+    check("H23 编辑保存后自动关闭",
+      mcpAfterEdit.mcps.find((m) => m.name === "bing-search").enabled === false, "");
+
+    // 初始启用复原（走 UI，让界面状态与服务端一致）
+    const mcpReOn = await evalJS(cdp, sessionId,
+      `(() => {
+        const row = document.querySelector('[data-testid="mcp-row-bing-search"]');
+        if (!row) return false;
+        const b = row.querySelector('[data-testid="mcp-enable"]');
+        if (!b) return false;
+        b.click(); return true;
+      })()`);
+    check("H24 编辑后可「初始启用」", mcpReOn);
+    await waitFor(cdp, sessionId, mcpIsOn("bing-search"), "初始启用复原", 15000);
+
+    /* 新增 MCP（添加弹窗：名称 + 简介 + 完整 JSON 串） */
+    check("H25 可打开「添加 MCP」弹窗",
+      await evalJS(cdp, sessionId,
+        `(() => { document.querySelector('[data-testid="mcp-add"]').click(); return true; })()`));
+    await waitFor(cdp, sessionId,
+      `!!document.querySelector('[data-testid="mcp-add-name"]')`, "添加弹窗", 10000);
+    await sleep(400);
+
+    const setNative = async (selector, value, proto) => evalJS(cdp, sessionId,
+      `(() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return false;
+        const setter = Object.getOwnPropertyDescriptor(window.${proto}.prototype, 'value').set;
+        setter.call(el, ${JSON.stringify(value)});
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()`);
+    await setNative('[data-testid="mcp-add-name"]', "e2e-probe-mcp", "HTMLInputElement");
+    await setNative('[data-testid="mcp-add-desc"]', "e2e 探针 MCP", "HTMLTextAreaElement");
+    const addJson = JSON.stringify({ mcpServers: { "e2e-probe-mcp": { command: NODE_EXE, args: [BING_ENTRY] } } });
+    await setNative('[data-testid="mcp-add-json"]', addJson, "HTMLTextAreaElement");
+    await sleep(500);
+    await evalJS(cdp, sessionId,
+      `(() => { document.querySelector('[data-testid="mcp-add-save"]').click(); return true; })()`);
+    await waitFor(cdp, sessionId,
+      `document.querySelectorAll('[data-testid^="mcp-row-"]').length >= 2`, "新增落库", 15000);
+    await sleep(600);
+    const mcpAfterAdd = await apiMcps();
+    const added = mcpAfterAdd.mcps.find((m) => m.name === "e2e-probe-mcp");
+    check("H26 新增 MCP 落库且默认关闭（transport 自动识别为 stdio）",
+      !!added && added.enabled === false && added.builtin === false && added.transport === "stdio",
+      JSON.stringify(added));
+    await shoot(cdp, sessionId, "14-mcp-added.png");
+
+    // 初始启用新增 MCP
+    const addOn = await evalJS(cdp, sessionId,
+      `(() => {
+        const row = document.querySelector('[data-testid="mcp-row-e2e-probe-mcp"]');
+        if (!row) return false;
+        const b = row.querySelector('[data-testid="mcp-enable"]');
+        if (!b) return false;
+        b.click(); return true;
+      })()`);
+    check("H27 新增后可「初始启用」", addOn);
+    await waitFor(cdp, sessionId, mcpIsOn("e2e-probe-mcp"), "新增初始启用", 20000);
+    const addOnState = await apiMcps();
+    const addedOn = addOnState.mcps.find((m) => m.name === "e2e-probe-mcp");
+    check("H28 新增 MCP 初始启用成功（2 工具、无错误）",
+      addedOn && addedOn.enabled === true && addedOn.tool_count === 2 && !addedOn.load_error,
+      JSON.stringify(addedOn));
+
+    /* 删除 MCP（确认弹窗） */
+    const delOpen = await evalJS(cdp, sessionId,
+      `(() => {
+        const row = document.querySelector('[data-testid="mcp-row-e2e-probe-mcp"]');
+        if (!row) return false;
+        row.querySelector('[data-testid="mcp-delete"]').click(); return true;
+      })()`);
+    check("H29 可打开删除确认弹窗", delOpen);
+    await waitFor(cdp, sessionId,
+      `!!document.querySelector('[data-testid="mcp-delete-confirm"]')`, "删除确认弹窗", 10000);
+    await sleep(400);
+    await evalJS(cdp, sessionId,
+      `(() => { document.querySelector('[data-testid="mcp-delete-confirm"]').click(); return true; })()`);
+    await waitFor(cdp, sessionId,
+      `document.querySelectorAll('[data-testid^="mcp-row-"]').length === 1`, "删除生效", 15000);
+    await sleep(600);
+    const mcpAfterDel = await apiMcps();
+    check("H30 删除已落库",
+      !mcpAfterDel.mcps.find((m) => m.name === "e2e-probe-mcp"),
+      JSON.stringify(mcpAfterDel.mcps.map((m) => m.name)));
+
+    // 复位默认（清掉 e2e-edited 覆盖，回到 1 开启 / 2 工具）
+    await evalJS(cdp, sessionId,
+      `fetch('/api/agent/panel/mcps/reset',{method:'POST'}).then(r=>r.json())`);
+    await sleep(1500);
+    const mcpFinal = await apiMcps();
+    check("H31 复位后回到默认（1 开启 / 2 工具）",
+      mcpFinal.summary.enabled === 1 && mcpFinal.summary.tool_count === 2,
+      JSON.stringify(mcpFinal.summary));
+
     /* ---------- 9. 服务不可达时的容错（可选校验：无 JS 报错） ---------- */
     const errs = cdp.events.filter(
       (e) => e.method === "Runtime.exceptionThrown"

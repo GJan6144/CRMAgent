@@ -15,6 +15,8 @@ export interface AgentMessage {
   created_at: string;
   /** 该条消息携带的数据卡片（render_card 工具产出），刷新后用于还原 */
   cards?: CardPayload[];
+  /** 该条消息携带的任务清单（write_todos 快照），刷新后用于还原 */
+  todos?: AgentTodo[];
 }
 
 /* ============================ 对话流数据卡片 ============================ */
@@ -67,9 +69,25 @@ export interface ChatMessage {
   tools?: ToolActivity[];
   /** 本轮产出的数据卡片，随 card 事件即时追加 */
   cards?: CardPayload[];
+  /**
+   * 本轮的任务清单（write_todos）；`write_todos` 每次回传完整清单，因此整体替换。
+   * 挂在消息上（而非全局），这样每轮回答各自保留自己的清单。
+   */
+  todos?: AgentTodo[];
   pending?: boolean;
   error?: string;
   created_at?: string;
+}
+
+/* ============================ 任务清单（write_todos） ============================ */
+
+/** 待办项状态：未开始 / 进行中 / 已完成 */
+export type AgentTodoStatus = "pending" | "in_progress" | "completed";
+
+/** `write_todos` 工具维护的一条待办（每次调用回传完整清单） */
+export interface AgentTodo {
+  content: string;
+  status: AgentTodoStatus;
 }
 
 /** 文件修改 / CRM 写操作 审批请求 */
@@ -109,7 +127,7 @@ export type AgentEvent =
       node?: string;
       ts?: string;
     }
-  | { event: "todo"; todos?: unknown[]; node?: string; ts?: string }
+  | { event: "todo"; todos?: AgentTodo[]; node?: string; ts?: string }
   | {
       event: "card";
       id?: string;
@@ -314,4 +332,52 @@ export interface PanelModelCheck {
   tested_at: string;
   reply_preview: string;
   error: string;
+}
+
+/* ============================ MCP 管理 ============================ */
+
+/** 面板 MCP 项（服务端由「默认定义 × 覆盖项」合并得到） */
+export interface PanelMcp {
+  /** MCP 标识（唯一，等同配置里的 server 名） */
+  name: string;
+  /** 中文名 */
+  label: string;
+  /** MCP 介绍 */
+  description: string;
+  /** 连接传输类型：stdio / sse / streamable_http / websocket */
+  transport: string;
+  /** 是否内置（内置可被删除，但「恢复默认」会再回来；自定义删除即消失） */
+  builtin: boolean;
+  /** 开关：关闭后 Agent 不可用该 MCP 的所有工具 */
+  enabled: boolean;
+  /** 连接配置（transport / command / args / url 等） */
+  config: Record<string, unknown>;
+  /** 该 MCP 暴露的工具名列表 */
+  tools: string[];
+  /** 已发现的工具数 */
+  tool_count: number;
+  /** 加载 / 发现失败时的错误信息（null = 正常） */
+  load_error: string | null;
+}
+
+/** MCP 清单汇总 */
+export interface PanelMcpSummary {
+  total: number;
+  enabled: number;
+  disabled: number;
+  tool_count: number;
+}
+
+/** MCP 清单响应 */
+export interface PanelMcpsResponse {
+  mcps: PanelMcp[];
+  summary: PanelMcpSummary;
+}
+
+/** MCP 完整定义原文（编辑弹窗用） */
+export interface PanelMcpConfig {
+  name: string;
+  /** 完整定义 JSON 原文（name / label / description / config） */
+  config: string;
+  enabled: boolean;
 }
