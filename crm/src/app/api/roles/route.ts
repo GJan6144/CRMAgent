@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Role, RoleQuery, CreateRoleRequest } from "@/types/role";
+import { DEFAULT_MONTHLY_TOKEN_QUOTA } from "@/types/role";
 import { readRoles, writeRoles, generateRoleId } from "./utils";
 
 /**
@@ -57,6 +58,8 @@ export async function POST(request: NextRequest) {
       id: generateRoleId(allRoles),
       createdAt: dateStr,
       name: body.name.trim(),
+      // 默认每月 token 额度（每个用户各自）；管理员可在「修改权限」弹窗里调整
+      monthlyTokenQuota: DEFAULT_MONTHLY_TOKEN_QUOTA,
       permissions: [],
     };
 

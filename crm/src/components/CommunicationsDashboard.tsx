@@ -38,7 +38,8 @@ export default function CommunicationsDashboard() {
   const fetchComms = useCallback(async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams();
+      // ★ 带上「我是谁」→ 服务端据此收口（sender === 本人 或 leadId 属于本人线索）
+      const params = perm.scopeParams();
       if (filters.startDate) params.set("startDate", filters.startDate);
       if (filters.endDate) params.set("endDate", filters.endDate);
       if (filters.leadId) params.set("leadId", filters.leadId);
@@ -57,7 +58,7 @@ export default function CommunicationsDashboard() {
     } finally {
       setLoading(false);
     }
-  }, [filters, page, pageSize]);
+  }, [filters, page, pageSize, perm]);
 
   useEffect(() => { fetchComms(); }, [fetchComms]);
 

@@ -58,6 +58,12 @@ export default function Modal({ open, onClose, title, children, width = "460px" 
           position: "relative",
           width,
           maxWidth: "90vw",
+          // ⚠️ 必须限高 + 内部滚动：内容比视口高时（如权限弹窗 12 个页面 + 额度区），
+          //    居中布局会把标题栏和底部按钮**同时挤出屏幕**，用户就「看不见完整弹窗」。
+          //    限高后由内容区自己滚动，头部与底部操作区始终可见。
+          maxHeight: "90vh",
+          display: "flex",
+          flexDirection: "column",
           background: "#fff",
           borderRadius: 16,
           boxShadow: "0 8px 32px rgba(0,0,0,0.12)",
@@ -73,6 +79,7 @@ export default function Modal({ open, onClose, title, children, width = "460px" 
             justifyContent: "space-between",
             padding: "20px 24px",
             borderBottom: "1px solid #E2E8F0",
+            flexShrink: 0,
           }}
         >
           <h2
@@ -115,8 +122,13 @@ export default function Modal({ open, onClose, title, children, width = "460px" 
           </button>
         </div>
 
-        {/* 内容 */}
-        <div style={{ padding: "24px" }}>{children}</div>
+        {/* 内容（超高时在这里滚动，标题与底部按钮保持可见） */}
+        <div
+          data-testid="modal-body"
+          style={{ padding: "24px", overflowY: "auto", flex: "1 1 auto", minHeight: 0 }}
+        >
+          {children}
+        </div>
       </div>
 
       <style>{`

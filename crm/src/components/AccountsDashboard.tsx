@@ -16,7 +16,7 @@ const INPUT_STYLE: React.CSSProperties = {
   fontSize: 13,
   fontFamily: "inherit",
   color: "#1E293B",
-  background: "#fff",
+  backgroundColor: "#fff",
   outline: "none",
   width: "100%",
   boxSizing: "border-box",

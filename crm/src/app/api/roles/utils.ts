@@ -14,9 +14,16 @@ export function readRoles(): Role[] {
   }
 }
 
-/** 写入所有角色 */
+/**
+ * 写入所有角色
+ *
+ * ⚠️ 必须保持项目的数据文件约定：UTF-8、indent=2、**CRLF**、无 BOM、末尾无换行。
+ * `JSON.stringify(..., null, 2)` 只产出 LF —— 直接用会把文件改成 LF，
+ * 与其他 data/*.json（leads/orders/accounts…）不一致，且会让后续按字节比对的脚本误判「文件被改坏」。
+ */
 export function writeRoles(roles: Role[]): void {
-  fs.writeFileSync(DATA_PATH, JSON.stringify(roles, null, 2), "utf-8");
+  const json = JSON.stringify(roles, null, 2).replace(/\r\n/g, "\n").replace(/\n/g, "\r\n");
+  fs.writeFileSync(DATA_PATH, json, "utf-8");
 }
 
 /** 根据 ID 查找角色 */

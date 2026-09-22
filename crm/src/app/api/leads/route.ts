@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Lead, LeadQuery, CreateLeadRequest } from "@/types/lead";
 import { readLeads, writeLeads, generateLeadId } from "./utils";
+import { resolveCallerScope, filterByOwner } from "../_scope";
 
 /**
  * GET /api/leads - 获取线索列表（支持筛选）
@@ -10,15 +11,20 @@ import { readLeads, writeLeads, generateLeadId } from "./utils";
  *   endDate   - 结束日期 (YYYY-MM-DD)
  *   name      - 姓名模糊搜索
  *   phone     - 电话模糊搜索
+ *   assignee  - 跟进人模糊搜索
  *   source    - 客户来源
  *   priority  - 优先级筛选 (high / medium / low)
  *   page      - 页码（默认 1）
  *   pageSize  - 每页条数（默认 5）
+ *
+ * 数据范围：调用者身份见 `_scope.ts`。「仅自己」时只返回 assignee === 本人 的线索。
  */
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
 
-  const allLeads = readLeads();
+  // ★ 先按数据范围收口（服务端读 roles.json 自算，不信任前端传的 scope）
+  const caller = resolveCallerScope(request, "leads");
+  const allLeads = filterByOwner(readLeads(), caller, ["assignee"]);
 
   // --- 筛选 ---
   const query: LeadQuery = {
@@ -26,6 +32,7 @@ export async function GET(request: NextRequest) {
     endDate: searchParams.get("endDate") ?? undefined,
     name: searchParams.get("name") ?? undefined,
     phone: searchParams.get("phone") ?? undefined,
+    assignee: searchParams.get("assignee") ?? undefined,
     source: searchParams.get("source") ?? undefined,
     priority: (searchParams.get("priority") as LeadQuery["priority"]) ?? "",
   };
@@ -46,6 +53,11 @@ export async function GET(request: NextRequest) {
     const kw = query.phone.trim();
     filtered = filtered.filter((l) => l.phone.includes(kw));
   }
+  // 跟进人模糊搜索（在数据范围收口之后叠加，不会绕过权限）
+  if (query.assignee) {
+    const kw = query.assignee.trim();
+    filtered = filtered.filter((l) => l.assignee.includes(kw));
+  }
   if (query.source) {
     filtered = filtered.filter((l) => l.source === query.source);
   }
@@ -65,6 +77,11 @@ export async function GET(request: NextRequest) {
 
 /**
  * POST /api/leads - 新增线索
+ *
+ * 数据范围：调用者身份见 `_scope.ts`。
+ * ⚠️ 「仅自己」的用户**只能把线索归到自己名下**：若请求里的 assignee 不是本人，
+ * 直接 403 拒绝（不是静默改写 —— 那样会让前端显示与实际落库不一致，更难排查）。
+ * 前端已把下拉框限制为仅本人可选，此处是**服务端兜底**，防绕过。
  */
 export async function POST(request: NextRequest) {
   try {
@@ -73,6 +90,15 @@ export async function POST(request: NextRequest) {
     // 校验必填字段
     if (!body.name || !body.phone || !body.priority || !body.source || !body.assignee) {
       return NextResponse.json({ error: "请填写完整线索信息" }, { status: 400 });
+    }
+
+    // ★ 归属校验：受限用户只能挂自己名下
+    const caller = resolveCallerScope(request, "leads");
+    if (caller.restricted && body.assignee.trim() !== caller.user_name) {
+      return NextResponse.json(
+        { error: `当前权限仅能创建归属自己的线索（跟进人须为 ${caller.user_name}）` },
+        { status: 403 }
+      );
     }
 
     const allLeads = readLeads();

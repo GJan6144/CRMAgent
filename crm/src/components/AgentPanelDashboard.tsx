@@ -5,16 +5,23 @@ import Sidebar from "./Sidebar";
 import Modal from "./Modal";
 import { usePermission } from "@/hooks/usePermission";
 import type {
+  PanelChannel,
+  PanelChannelsResponse,
   PanelConfig,
   PanelMcp,
   PanelMcpConfig,
   PanelMcpsResponse,
+  PanelMemoryEntry,
+  PanelMemoryResponse,
+  PanelModel,
   PanelModelCheck,
+  PanelModelsResponse,
   PanelOverview,
   PanelSkill,
   PanelSkillContent,
   PanelSkillsResponse,
   PanelTool,
+  TokenUsageResponse,
   ToolPolicy,
 } from "@/types/agent";
 
@@ -254,10 +261,26 @@ function tabButton(active: boolean): React.CSSProperties {
   };
 }
 
+/** 表格行内小按钮（编辑 / 开启关闭 / 删除） */
+function miniBtn(danger: boolean, busy = false): React.CSSProperties {
+  return {
+    padding: "5px 11px",
+    borderRadius: 8,
+    fontSize: 12,
+    fontWeight: 600,
+    fontFamily: "inherit",
+    cursor: busy ? "wait" : "pointer",
+    border: `1px solid ${danger ? "#FECACA" : BORDER}`,
+    background: "#fff",
+    color: danger ? "#DC2626" : TEXT,
+    opacity: busy ? 0.6 : 1,
+    whiteSpace: "nowrap",
+  };
+}
+
 function fmtNum(n: number): string {
   return (n ?? 0).toLocaleString("zh-CN");
 }
-
 /** 耗时格式化：自动在 毫秒 / 秒 之间切换（单位与数值匹配，避免「3.92 ms」这类误导） */
 function fmtLatency(ms: number): { value: string; unit: string } {
   const v = ms ?? 0;
@@ -297,7 +320,9 @@ const SOURCE_TONE: Record<string, "gray" | "blue" | "green" | "amber" | "red"> =
 export default function AgentPanelDashboard() {
   const perm = usePermission("agent");
 
-  const [tab, setTab] = useState<"overview" | "config" | "skills" | "mcp">("overview");
+  const [tab, setTab] = useState<
+    "overview" | "config" | "skills" | "mcp" | "channel" | "memory" | "model" | "usage"
+  >("overview");
   const [subTab, setSubTab] = useState<"prompt" | "tools" | "policy">("prompt");
 
   // ---- Skill 管理 ----
@@ -336,6 +361,52 @@ export default function AgentPanelDashboard() {
   // ---- MCP 删除 ----
   const [mcpDelete, setMcpDelete] = useState<PanelMcp | null>(null);
   const [mcpDeleting, setMcpDeleting] = useState(false);
+
+  // ---- 渠道管理 ----
+  const [channelsData, setChannelsData] = useState<PanelChannelsResponse | null>(null);
+  const [busyChannel, setBusyChannel] = useState<string | null>(null);
+  /** 正在编辑凭证的渠道（null = 弹窗关闭） */
+  const [channelEdit, setChannelEdit] = useState<PanelChannel | null>(null);
+  const [channelAppId, setChannelAppId] = useState("");
+  const [channelAppSecret, setChannelAppSecret] = useState("");
+  const [channelSaving, setChannelSaving] = useState(false);
+  const [channelError, setChannelError] = useState("");
+
+  // ---- 记忆 ----
+  const [memoryData, setMemoryData] = useState<PanelMemoryResponse | null>(null);
+  const [busyMemory, setBusyMemory] = useState<string | null>(null);
+  /** 正在编辑的记忆条目（null = 弹窗关闭）；新增时为 key="" 的空条目 */
+  const [memoryEdit, setMemoryEdit] = useState<PanelMemoryEntry | null>(null);
+  const [memoryEditKey, setMemoryEditKey] = useState("");
+  const [memoryEditValue, setMemoryEditValue] = useState("");
+  const [memorySaving, setMemorySaving] = useState(false);
+  const [memoryError, setMemoryError] = useState("");
+  /** 待删除确认的记忆条目 */
+  const [memoryDelete, setMemoryDelete] = useState<PanelMemoryEntry | null>(null);
+  const [memoryDeleting, setMemoryDeleting] = useState(false);
+  /** AGENTS.md 编辑草稿 */
+  const [agentsMdDraft, setAgentsMdDraft] = useState("");
+  const [agentsMdDirty, setAgentsMdDirty] = useState(false);
+  const [agentsMdSaving, setAgentsMdSaving] = useState(false);
+
+  // ---- 模型管理 ----
+  const [modelsData, setModelsData] = useState<PanelModelsResponse | null>(null);
+  const [busyModel, setBusyModel] = useState<string | null>(null);
+  /** 正在编辑的模型（null = 弹窗关闭） */
+  const [modelEdit, setModelEdit] = useState<PanelModel | null>(null);
+  const [modelDraft, setModelDraft] = useState<{
+    id: string;
+    name: string;
+    base_url: string;
+    api_key: string;
+    vision: boolean;
+    context_length: string;
+  } | null>(null);
+  const [modelSaving, setModelSaving] = useState(false);
+  const [modelError, setModelError] = useState("");
+  /** 待删除确认的模型 */
+  const [modelDelete, setModelDelete] = useState<PanelModel | null>(null);
+  const [modelDeleting, setModelDeleting] = useState(false);
 
   const [overview, setOverview] = useState<PanelOverview | null>(null);
   const [config, setConfig] = useState<PanelConfig | null>(null);
@@ -426,6 +497,50 @@ export default function AgentPanelDashboard() {
       setError("");
     } catch {
       setError("无法连接 Agent 服务，请确认 DeepAgents 服务（8765）已启动。");
+    }
+  }, []);
+
+  const loadChannels = useCallback(async () => {
+    try {
+      const res = await fetch("/api/agent/panel/channels", { cache: "no-store" });
+      if (!res.ok) throw new Error(String(res.status));
+      setChannelsData((await res.json()) as PanelChannelsResponse);
+      setError("");
+    } catch {
+      setError("无法连接 Agent 服务，请确认 DeepAgents 服务（8765）已启动。");
+    }
+  }, []);
+
+  const loadMemory = useCallback(async () => {
+    try {
+      const res = await fetch("/api/agent/panel/memory", { cache: "no-store" });
+      if (!res.ok) throw new Error(String(res.status));
+      const data = (await res.json()) as PanelMemoryResponse;
+      setMemoryData(data);
+      setAgentsMdDraft(data.agents_md);
+      setAgentsMdDirty(false);
+      setError("");
+    } catch {
+      setError("无法连接 Agent 服务，请确认 DeepAgents 服务（8765）已启动。");
+    }
+  }, []);
+
+  // ---- token 消耗统计（总量 + 按用户） ----
+  const [usageData, setUsageData] = useState<TokenUsageResponse | null>(null);
+  const [usageScope, setUsageScope] = useState<"all" | "today">("all");
+  const [usageLoading, setUsageLoading] = useState(false);
+
+  const loadTokenUsage = useCallback(async (scope: "all" | "today" = "all") => {
+    setUsageLoading(true);
+    try {
+      const res = await fetch(`/api/agent/panel/token-usage?scope=${scope}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(String(res.status));
+      setUsageData((await res.json()) as TokenUsageResponse);
+      setError("");
+    } catch {
+      setError("无法连接 Agent 服务，请确认 DeepAgents 服务（8765）已启动。");
+    } finally {
+      setUsageLoading(false);
     }
   }, []);
 
@@ -868,6 +983,335 @@ export default function AgentPanelDashboard() {
     }
   }, [mcpDelete, flash]);
 
+  /* ---------------- 渠道管理操作 ---------------- */
+
+  const setChannelEnabled = useCallback(
+    async (name: string, enabled: boolean) => {
+      setBusyChannel(name);
+      try {
+        const res = await fetch(`/api/agent/panel/channels/${encodeURIComponent(name)}/enabled`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled }),
+        });
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          throw new Error(typeof e.detail === "string" ? e.detail : String(res.status));
+        }
+        const body = await res.json().catch(() => null);
+        if (body?.channel) {
+          const fresh = body.channel as PanelChannel;
+          setChannelsData((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  channels: prev.channels.map((c) => (c.name === name ? fresh : c)),
+                  summary: body.summary ?? prev.summary,
+                }
+              : prev
+          );
+        }
+        flash(`渠道「${name}」已${enabled ? "开启" : "关闭"}，下一轮对话生效`);
+      } catch (e) {
+        flash(e instanceof Error ? `操作失败：${e.message}` : "操作失败，请重试");
+        loadChannels();
+      } finally {
+        setBusyChannel(null);
+      }
+    },
+    [flash, loadChannels]
+  );
+
+  const openChannelEditor = useCallback((ch: PanelChannel) => {
+    setChannelEdit(ch);
+    setChannelAppId("");
+    setChannelAppSecret("");
+    setChannelError("");
+  }, []);
+
+  const saveChannelCredentials = useCallback(async () => {
+    if (!channelEdit) return;
+    if (!channelAppId.trim() || !channelAppSecret.trim()) {
+      setChannelError("App ID 与 App Secret 均不能为空");
+      return;
+    }
+    setChannelSaving(true);
+    setChannelError("");
+    try {
+      const res = await fetch(
+        `/api/agent/panel/channels/${encodeURIComponent(channelEdit.name)}/credentials`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ app_id: channelAppId.trim(), app_secret: channelAppSecret.trim() }),
+        }
+      );
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(typeof e.detail === "string" ? e.detail : String(res.status));
+      }
+      const body = await res.json().catch(() => null);
+      if (body?.channel) {
+        const fresh = body.channel as PanelChannel;
+        setChannelsData((prev) =>
+          prev
+            ? { ...prev, channels: prev.channels.map((c) => (c.name === fresh.name ? fresh : c)) }
+            : prev
+        );
+      }
+      flash(`渠道「${channelEdit.name}」凭证已更新`);
+      setChannelEdit(null);
+    } catch (e) {
+      setChannelError(e instanceof Error ? e.message : "保存失败");
+    } finally {
+      setChannelSaving(false);
+    }
+  }, [channelEdit, channelAppId, channelAppSecret, flash]);
+
+  const reauthorizeChannel = useCallback(async () => {
+    try {
+      const res = await fetch("/api/agent/feishu/authorize-url", { cache: "no-store" });
+      if (!res.ok) throw new Error(String(res.status));
+      const data = await res.json().catch(() => null);
+      if (data?.url) {
+        window.open(data.url, "_blank", "noopener");
+      } else {
+        flash("获取授权地址失败");
+      }
+    } catch {
+      flash("获取授权地址失败，请重试");
+    }
+  }, [flash]);
+
+  /* ---------------- 记忆操作 ---------------- */
+
+  const openMemoryEditor = useCallback((entry: PanelMemoryEntry | null) => {
+    setMemoryEdit(entry ?? { key: "", value: "" });
+    setMemoryEditKey(entry?.key ?? "");
+    setMemoryEditValue(entry?.value ?? "");
+    setMemoryError("");
+  }, []);
+
+  const saveMemory = useCallback(async () => {
+    const key = memoryEditKey.trim();
+    const value = memoryEditValue.trim();
+    if (!key) {
+      setMemoryError("记忆的 key 不能为空");
+      return;
+    }
+    if (!value) {
+      setMemoryError("记忆内容不能为空");
+      return;
+    }
+    setMemorySaving(true);
+    setMemoryError("");
+    try {
+      const res = await fetch("/api/agent/panel/memory", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key, value }),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(typeof e.detail === "string" ? e.detail : String(res.status));
+      }
+      flash(`记忆「${key}」已保存`);
+      setMemoryEdit(null);
+      loadMemory();
+    } catch (e) {
+      setMemoryError(e instanceof Error ? e.message : "保存失败");
+    } finally {
+      setMemorySaving(false);
+    }
+  }, [memoryEditKey, memoryEditValue, flash, loadMemory]);
+
+  const confirmDeleteMemory = useCallback(async () => {
+    if (!memoryDelete) return;
+    setMemoryDeleting(true);
+    try {
+      const res = await fetch(`/api/agent/panel/memory/${encodeURIComponent(memoryDelete.key)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(typeof e.detail === "string" ? e.detail : String(res.status));
+      }
+      flash(`记忆「${memoryDelete.key}」已删除`);
+      setMemoryDelete(null);
+      loadMemory();
+    } catch (e) {
+      flash(e instanceof Error ? `删除失败：${e.message}` : "删除失败");
+    } finally {
+      setMemoryDeleting(false);
+    }
+  }, [memoryDelete, flash, loadMemory]);
+
+  /* ---------------- 模型管理操作 ---------------- */
+
+  const loadModels = useCallback(async () => {
+    try {
+      const res = await fetch("/api/agent/panel/models", { cache: "no-store" });
+      if (!res.ok) throw new Error(String(res.status));
+      setModelsData((await res.json()) as PanelModelsResponse);
+      setError("");
+    } catch {
+      setError("无法连接 Agent 服务，请确认 DeepAgents 服务（8765）已启动。");
+    }
+  }, []);
+
+  const EMPTY_MODEL_DRAFT = {
+    id: "",
+    name: "",
+    base_url: "",
+    api_key: "",
+    vision: false,
+    context_length: "1048576",
+  };
+
+  /** 打开编辑弹窗（传 null 表示新增） */
+  const openModelEditor = useCallback((m: PanelModel | null) => {
+    setModelError("");
+    setModelEdit(m);
+    setModelDraft(
+      m
+        ? {
+            id: m.id,
+            name: m.name,
+            base_url: m.base_url,
+            api_key: "",
+            vision: m.vision,
+            context_length: String(m.context_length),
+          }
+        : { ...EMPTY_MODEL_DRAFT },
+    );
+  }, []);
+
+  const saveModel = useCallback(async () => {
+    if (!modelDraft) return;
+    const isCreate = !modelEdit;
+    const id = modelDraft.id.trim();
+    const name = modelDraft.name.trim();
+    const baseUrl = modelDraft.base_url.trim();
+    if (!id) {
+      setModelError("模型 ID 不能为空");
+      return;
+    }
+    if (!name) {
+      setModelError("模型名称不能为空");
+      return;
+    }
+    if (!baseUrl) {
+      setModelError("API 地址不能为空");
+      return;
+    }
+    const ctx = Number(modelDraft.context_length);
+    if (!Number.isFinite(ctx) || ctx <= 0) {
+      setModelError("上下文长度必须是正整数");
+      return;
+    }
+    setModelSaving(true);
+    setModelError("");
+    const payload = {
+      id,
+      name,
+      base_url: baseUrl,
+      api_key: modelDraft.api_key,
+      vision: modelDraft.vision,
+      context_length: Math.floor(ctx),
+    };
+    try {
+      const res = await fetch(
+        isCreate ? "/api/agent/panel/models" : `/api/agent/panel/models/${encodeURIComponent(modelEdit!.id)}`,
+        {
+          method: isCreate ? "POST" : "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      );
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(typeof e.detail === "string" ? e.detail : String(res.status));
+      }
+      flash(isCreate ? `模型「${name}」已添加` : `模型「${name}」已保存`);
+      setModelEdit(null);
+      setModelDraft(null);
+      loadModels();
+      loadOverview(true);
+    } catch (e) {
+      setModelError(e instanceof Error ? e.message : "保存失败");
+    } finally {
+      setModelSaving(false);
+    }
+  }, [modelDraft, modelEdit, flash, loadModels, loadOverview]);
+
+  const setModelEnabled = useCallback(
+    async (m: PanelModel, enabled: boolean) => {
+      setBusyModel(m.id);
+      try {
+        const res = await fetch(`/api/agent/panel/models/${encodeURIComponent(m.id)}/enabled`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled }),
+        });
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          throw new Error(typeof e.detail === "string" ? e.detail : String(res.status));
+        }
+        flash(`模型「${m.name}」已${enabled ? "开启" : "关闭"}`);
+        loadModels();
+        loadOverview(true);
+      } catch (e) {
+        flash(e instanceof Error ? `操作失败：${e.message}` : "操作失败");
+      } finally {
+        setBusyModel(null);
+      }
+    },
+    [flash, loadModels, loadOverview],
+  );
+
+  const confirmDeleteModel = useCallback(async () => {
+    if (!modelDelete) return;
+    setModelDeleting(true);
+    try {
+      const res = await fetch(`/api/agent/panel/models/${encodeURIComponent(modelDelete.id)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(typeof e.detail === "string" ? e.detail : String(res.status));
+      }
+      flash(`模型「${modelDelete.name}」已删除`);
+      setModelDelete(null);
+      loadModels();
+      loadOverview(true);
+    } catch (e) {
+      flash(e instanceof Error ? `删除失败：${e.message}` : "删除失败");
+    } finally {
+      setModelDeleting(false);
+    }
+  }, [modelDelete, flash, loadModels, loadOverview]);
+
+  const saveAgentsMd = useCallback(async () => {
+    setAgentsMdSaving(true);
+    try {
+      const res = await fetch("/api/agent/panel/memory/agents-md", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: agentsMdDraft }),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(typeof e.detail === "string" ? e.detail : String(res.status));
+      }
+      setAgentsMdDirty(false);
+      flash("项目记忆文件 AGENTS.md 已保存，下一轮对话生效");
+    } catch (e) {
+      flash(e instanceof Error ? `保存失败：${e.message}` : "保存失败");
+    } finally {
+      setAgentsMdSaving(false);
+    }
+  }, [agentsMdDraft, flash]);
+
   /* ---------------- 派生数据 ---------------- */
 
   const grouped = useMemo(() => {
@@ -1072,6 +1516,46 @@ export default function AgentPanelDashboard() {
             }}
           >
             MCP 管理
+          </button>
+          <button
+            data-testid="tab-channel"
+            style={tabButton(tab === "channel")}
+            onClick={() => {
+              setTab("channel");
+              loadChannels();
+            }}
+          >
+            渠道管理
+          </button>
+          <button
+            data-testid="tab-memory"
+            style={tabButton(tab === "memory")}
+            onClick={() => {
+              setTab("memory");
+              loadMemory();
+            }}
+          >
+            记忆
+          </button>
+          <button
+            data-testid="tab-model"
+            style={tabButton(tab === "model")}
+            onClick={() => {
+              setTab("model");
+              loadModels();
+            }}
+          >
+            模型管理
+          </button>
+          <button
+            data-testid="tab-usage"
+            style={tabButton(tab === "usage")}
+            onClick={() => {
+              setTab("usage");
+              loadTokenUsage(usageScope);
+            }}
+          >
+            用量统计
           </button>
         </div>
 
@@ -2098,7 +2582,906 @@ export default function AgentPanelDashboard() {
             </div>
           </>
         )}
+
+        {/* ==================== 渠道管理 ==================== */}
+        {tab === "channel" && (
+          <>
+            <div
+              style={{
+                ...CARD,
+                padding: "12px 18px",
+                marginBottom: 14,
+                display: "flex",
+                gap: 18,
+                alignItems: "center",
+                flexWrap: "wrap",
+              }}
+            >
+              <span style={{ fontSize: 12.5, color: MUTED }}>
+                共 <b style={{ color: TEXT }}>{channelsData?.summary.total ?? 0}</b> 个渠道 · 已开启{" "}
+                <b style={{ color: "#059669" }}>{channelsData?.summary.enabled ?? 0}</b> · 已关闭{" "}
+                <b style={{ color: "#DC2626" }}>{channelsData?.summary.disabled ?? 0}</b>
+              </span>
+              <span style={{ flex: 1 }} />
+              <span style={{ fontSize: 11.5, color: SUBTLE }}>
+                渠道关闭后，该渠道的工具与接收消息对 Agent 全部不可用；改动在下一轮对话生效
+              </span>
+            </div>
+
+            <Card style={{ overflow: "hidden" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ background: "#F8FAFC" }}>
+                    {["渠道", "状态", "操作"].map((h) => (
+                      <th
+                        key={h}
+                        style={{
+                          textAlign: "left",
+                          padding: "11px 16px",
+                          fontSize: 12,
+                          fontWeight: 700,
+                          color: MUTED,
+                          borderBottom: `1px solid ${BORDER}`,
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {(channelsData?.channels ?? []).map((c) => (
+                    <tr
+                      key={c.name}
+                      data-testid={`channel-row-${c.name}`}
+                      style={{ borderBottom: "1px solid #F1F5F9" }}
+                    >
+                      {/* 渠道名 + 介绍 */}
+                      <td style={{ padding: "12px 16px", verticalAlign: "top", maxWidth: 480 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <code
+                            style={{
+                              fontSize: 12.5,
+                              fontWeight: 700,
+                              color: TEXT,
+                              background: "#F1F5F9",
+                              padding: "2px 7px",
+                              borderRadius: 5,
+                            }}
+                          >
+                            {c.name}
+                          </code>
+                          <span style={{ fontSize: 13, fontWeight: 600, color: TEXT }}>{c.label}</span>
+                          {c.configured ? <Tag tone="green">已配置凭证</Tag> : <Tag tone="amber">未配置凭证</Tag>}
+                          {!c.enabled ? <Tag tone="gray">已关闭</Tag> : null}
+                        </div>
+                        <div style={{ fontSize: 11.5, color: SUBTLE, marginTop: 5, lineHeight: 1.6 }}>
+                          {c.description}
+                        </div>
+                      </td>
+
+                      {/* 状态 */}
+                      <td style={{ padding: "12px 16px", verticalAlign: "top", whiteSpace: "nowrap" }}>
+                        <span
+                          style={{
+                            fontSize: 11.5,
+                            fontWeight: 600,
+                            color: c.enabled ? "#059669" : SUBTLE,
+                          }}
+                        >
+                          {c.enabled ? "开启" : "关闭"}
+                        </span>
+                      </td>
+
+                      {/* 操作：开关 + 编辑 */}
+                      <td style={{ padding: "12px 16px", verticalAlign: "top" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          {c.enabled ? (
+                            <button
+                              type="button"
+                              data-testid="channel-disable"
+                              onClick={() => setChannelEnabled(c.name, false)}
+                              disabled={busyChannel === c.name}
+                              style={{
+                                padding: "5px 11px",
+                                borderRadius: 8,
+                                fontSize: 12,
+                                fontWeight: 600,
+                                fontFamily: "inherit",
+                                cursor: busyChannel === c.name ? "not-allowed" : "pointer",
+                                border: `1px solid ${BORDER}`,
+                                background: "#fff",
+                                color: MUTED,
+                              }}
+                            >
+                              {busyChannel === c.name ? "处理中…" : "关闭"}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              data-testid="channel-enable"
+                              onClick={() => setChannelEnabled(c.name, true)}
+                              disabled={busyChannel === c.name}
+                              style={{
+                                padding: "5px 11px",
+                                borderRadius: 8,
+                                fontSize: 12,
+                                fontWeight: 600,
+                                fontFamily: "inherit",
+                                cursor: busyChannel === c.name ? "not-allowed" : "pointer",
+                                border: "1px solid #A7F3D0",
+                                background: "#ECFDF5",
+                                color: "#059669",
+                              }}
+                            >
+                              {busyChannel === c.name ? "处理中…" : "开启"}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            data-testid="channel-edit"
+                            onClick={() => openChannelEditor(c)}
+                            style={{
+                              padding: "5px 11px",
+                              borderRadius: 8,
+                              fontSize: 12,
+                              fontWeight: 600,
+                              fontFamily: "inherit",
+                              cursor: "pointer",
+                              border: `1px solid ${BORDER}`,
+                              background: "#fff",
+                              color: TEXT,
+                            }}
+                          >
+                            编辑
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {channelsData && channelsData.channels.length === 0 ? (
+                    <tr>
+                      <td colSpan={3} style={{ padding: 32, textAlign: "center", color: SUBTLE, fontSize: 13 }}>
+                        没有配置任何通信渠道。
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </Card>
+
+            <div style={{ fontSize: 11.5, color: SUBTLE, marginTop: 12, lineHeight: 1.7 }}>
+              通信渠道让 Agent 通过外部 IM（当前为飞书）收发消息。开启后 Agent 可获得该渠道的
+              发送 / 回复 / 搜通讯录工具，并接收渠道发来的消息；关闭后全部不可用。
+            </div>
+          </>
+        )}
+
+        {/* ==================== 记忆 ==================== */}
+        {tab === "memory" && (
+          <>
+            <div
+              style={{
+                ...CARD,
+                padding: "12px 18px",
+                marginBottom: 14,
+                display: "flex",
+                gap: 18,
+                alignItems: "center",
+                flexWrap: "wrap",
+              }}
+            >
+              <span style={{ fontSize: 12.5, color: MUTED }}>
+                长期记忆 <b style={{ color: TEXT }}>{memoryData?.summary.memories_count ?? 0}</b> 条
+                {memoryData && !memoryData.store_ready ? <Tag tone="amber">记忆库未就绪</Tag> : null}
+              </span>
+              <span style={{ flex: 1 }} />
+              <span style={{ fontSize: 11.5, color: SUBTLE }}>
+                长期记忆由 store_memory / recall_memory 工具读写，跨会话持久；AGENTS.md 每轮对话加载进系统提示词
+              </span>
+            </div>
+
+            {/* 长期记忆条目 */}
+            <Card style={{ overflow: "hidden", marginBottom: 18 }}>
+              <div
+                style={{
+                  padding: "14px 18px",
+                  borderBottom: `1px solid ${BORDER}`,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                }}
+              >
+                <span style={{ fontSize: 13.5, fontWeight: 700, color: TEXT }}>长期记忆条目</span>
+                <span style={{ flex: 1 }} />
+                <button
+                  type="button"
+                  data-testid="memory-add"
+                  onClick={() => openMemoryEditor(null)}
+                  style={{
+                    padding: "6px 14px",
+                    borderRadius: 8,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    fontFamily: "inherit",
+                    cursor: "pointer",
+                    border: "none",
+                    background: PRIMARY,
+                    color: "#fff",
+                  }}
+                >
+                  新增记忆
+                </button>
+              </div>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ background: "#F8FAFC" }}>
+                    {["Key", "内容", "操作"].map((h) => (
+                      <th
+                        key={h}
+                        style={{
+                          textAlign: "left",
+                          padding: "11px 16px",
+                          fontSize: 12,
+                          fontWeight: 700,
+                          color: MUTED,
+                          borderBottom: `1px solid ${BORDER}`,
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {(memoryData?.memories ?? []).map((m) => (
+                    <tr
+                      key={m.key}
+                      data-testid={`memory-row-${m.key}`}
+                      style={{ borderBottom: "1px solid #F1F5F9" }}
+                    >
+                      <td style={{ padding: "12px 16px", verticalAlign: "top", whiteSpace: "nowrap" }}>
+                        <code
+                          style={{
+                            fontSize: 12.5,
+                            fontWeight: 700,
+                            color: TEXT,
+                            background: "#F1F5F9",
+                            padding: "2px 7px",
+                            borderRadius: 5,
+                          }}
+                        >
+                          {m.key}
+                        </code>
+                      </td>
+                      <td style={{ padding: "12px 16px", verticalAlign: "top", maxWidth: 460 }}>
+                        <div
+                          style={{
+                            fontSize: 12.5,
+                            color: TEXT,
+                            lineHeight: 1.6,
+                            whiteSpace: "pre-wrap",
+                            wordBreak: "break-word",
+                          }}
+                        >
+                          {m.value}
+                        </div>
+                      </td>
+                      <td style={{ padding: "12px 16px", verticalAlign: "top", whiteSpace: "nowrap" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <button
+                            type="button"
+                            data-testid="memory-edit"
+                            onClick={() => openMemoryEditor(m)}
+                            style={{
+                              padding: "5px 11px",
+                              borderRadius: 8,
+                              fontSize: 12,
+                              fontWeight: 600,
+                              fontFamily: "inherit",
+                              cursor: "pointer",
+                              border: `1px solid ${BORDER}`,
+                              background: "#fff",
+                              color: TEXT,
+                            }}
+                          >
+                            编辑
+                          </button>
+                          <button
+                            type="button"
+                            data-testid="memory-delete"
+                            onClick={() => setMemoryDelete(m)}
+                            style={{
+                              padding: "5px 11px",
+                              borderRadius: 8,
+                              fontSize: 12,
+                              fontWeight: 600,
+                              fontFamily: "inherit",
+                              cursor: "pointer",
+                              border: "1px solid #FECACA",
+                              background: "#FEF2F2",
+                              color: "#DC2626",
+                            }}
+                          >
+                            删除
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {memoryData && memoryData.memories.length === 0 ? (
+                    <tr>
+                      <td colSpan={3} style={{ padding: 32, textAlign: "center", color: SUBTLE, fontSize: 13 }}>
+                        暂无长期记忆，点右上角「新增记忆」添加一条。
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </Card>
+
+            {/* 项目记忆文件 AGENTS.md */}
+            <Card style={{ overflow: "hidden" }}>
+              <div
+                style={{
+                  padding: "14px 18px",
+                  borderBottom: `1px solid ${BORDER}`,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                }}
+              >
+                <span style={{ fontSize: 13.5, fontWeight: 700, color: TEXT }}>项目记忆文件 AGENTS.md</span>
+                {agentsMdDirty ? <Tag tone="amber">未保存</Tag> : null}
+                <span style={{ flex: 1 }} />
+                <button
+                  type="button"
+                  data-testid="agents-md-save"
+                  onClick={saveAgentsMd}
+                  disabled={agentsMdSaving || !agentsMdDirty}
+                  style={{
+                    padding: "6px 14px",
+                    borderRadius: 8,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    fontFamily: "inherit",
+                    cursor: agentsMdSaving || !agentsMdDirty ? "not-allowed" : "pointer",
+                    border: "none",
+                    background: PRIMARY,
+                    color: "#fff",
+                    opacity: agentsMdSaving || !agentsMdDirty ? 0.5 : 1,
+                  }}
+                >
+                  {agentsMdSaving ? "保存中…" : "保存"}
+                </button>
+              </div>
+              <div style={{ padding: 14 }}>
+                <textarea
+                  data-testid="agents-md-editor"
+                  value={agentsMdDraft}
+                  onChange={(e) => {
+                    setAgentsMdDraft(e.target.value);
+                    setAgentsMdDirty(true);
+                  }}
+                  rows={16}
+                  style={{
+                    width: "100%",
+                    padding: "12px 14px",
+                    borderRadius: 8,
+                    border: "1px solid #E2E8F0",
+                    fontSize: 12.5,
+                    lineHeight: 1.6,
+                    color: "#0F172A",
+                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+                    boxSizing: "border-box",
+                    outline: "none",
+                    resize: "vertical",
+                  }}
+                />
+              </div>
+            </Card>
+
+            <div style={{ fontSize: 11.5, color: SUBTLE, marginTop: 12, lineHeight: 1.7 }}>
+              两套记忆：<b>长期记忆条目</b>（键值，由 store_memory / recall_memory 工具读写，存于 SQLite，跨会话持久）
+              与 <b>AGENTS.md</b>（项目记忆文件，每轮对话由框架 MemoryMiddleware 加载进系统提示词）。
+              长期记忆适合存用户偏好、约定、个人资料等结构化条目；AGENTS.md 适合存项目级上下文与操作规范。
+            </div>
+          </>
+        )}
+
+        {/* ==================== 模型管理 ==================== */}
+        {tab === "model" && (
+          <>
+            <div
+              style={{
+                ...CARD,
+                padding: "12px 18px",
+                marginBottom: 14,
+                display: "flex",
+                gap: 18,
+                alignItems: "center",
+                flexWrap: "wrap",
+              }}
+            >
+              <span style={{ fontSize: 12.5, color: MUTED }}>
+                共 <b style={{ color: TEXT }}>{modelsData?.summary.total ?? 0}</b> 个模型
+              </span>
+              <span style={{ fontSize: 12.5, color: MUTED }}>
+                已开启 <b style={{ color: "#059669" }}>{modelsData?.summary.enabled ?? 0}</b>
+              </span>
+              <span style={{ fontSize: 12.5, color: MUTED }}>
+                支持图片识别 <b style={{ color: PRIMARY }}>{modelsData?.summary.vision ?? 0}</b>
+              </span>
+              {modelsData?.selected ? (
+                <span style={{ fontSize: 12.5, color: MUTED }}>
+                  默认模型{" "}
+                  <b style={{ color: TEXT }}>{modelsData.selected}</b>
+                </span>
+              ) : null}
+              <span style={{ flex: 1 }} />
+              <span style={{ fontSize: 11.5, color: SUBTLE }}>
+                仅「开启」的模型可在对话界面的模型下拉框中切换使用
+              </span>
+            </div>
+
+            <Card style={{ overflow: "hidden", marginBottom: 18 }}>
+              <div
+                style={{
+                  padding: "14px 18px",
+                  borderBottom: `1px solid ${BORDER}`,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                }}
+              >
+                <span style={{ fontSize: 13.5, fontWeight: 700, color: TEXT }}>模型列表</span>
+                <span style={{ flex: 1 }} />
+                <button
+                  type="button"
+                  data-testid="model-add"
+                  onClick={() => openModelEditor(null)}
+                  style={{
+                    padding: "6px 14px",
+                    borderRadius: 8,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    fontFamily: "inherit",
+                    cursor: "pointer",
+                    border: "none",
+                    background: PRIMARY,
+                    color: "#fff",
+                  }}
+                >
+                  添加模型
+                </button>
+              </div>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ background: "#F8FAFC" }}>
+                    {["模型名称", "模型 ID", "API 地址", "能力", "上下文", "状态", "操作"].map((h) => (
+                      <th
+                        key={h}
+                        style={{
+                          textAlign: "left",
+                          padding: "11px 16px",
+                          fontSize: 12,
+                          fontWeight: 700,
+                          color: MUTED,
+                          borderBottom: `1px solid ${BORDER}`,
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {(modelsData?.models ?? []).map((m) => {
+                    const isDefault = modelsData?.selected === m.id;
+                    return (
+                      <tr
+                        key={m.id}
+                        data-testid={`model-row-${m.id}`}
+                        style={{ borderBottom: "1px solid #F1F5F9" }}
+                      >
+                        <td style={{ padding: "12px 16px", verticalAlign: "middle", whiteSpace: "nowrap" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                            <span style={{ fontSize: 13, fontWeight: 700, color: TEXT }}>{m.name}</span>
+                            {isDefault ? <Tag tone="blue">默认</Tag> : null}
+                            {m.vision ? <Tag tone="green">图片</Tag> : null}
+                          </div>
+                        </td>
+                        <td style={{ padding: "12px 16px", verticalAlign: "middle", whiteSpace: "nowrap" }}>
+                          <code
+                            style={{
+                              fontSize: 12,
+                              color: TEXT,
+                              background: "#F1F5F9",
+                              padding: "2px 7px",
+                              borderRadius: 5,
+                            }}
+                          >
+                            {m.id}
+                          </code>
+                        </td>
+                        <td
+                          style={{
+                            padding: "12px 16px",
+                            verticalAlign: "middle",
+                            fontSize: 12,
+                            color: MUTED,
+                            maxWidth: 240,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                          title={m.base_url}
+                        >
+                          {m.base_url}
+                        </td>
+                        <td style={{ padding: "12px 16px", verticalAlign: "middle", whiteSpace: "nowrap" }}>
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                            <span style={{ fontSize: 12, color: MUTED }}>
+                              {m.vision ? "多模态" : "纯文本"}
+                            </span>
+                          </div>
+                        </td>
+                        <td
+                          style={{
+                            padding: "12px 16px",
+                            verticalAlign: "middle",
+                            fontSize: 12,
+                            color: MUTED,
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {m.context_length >= 1024 * 1024 && m.context_length % (1024 * 1024) === 0
+                            ? `${m.context_length / (1024 * 1024)}M`
+                            : m.context_length >= 1024
+                              ? `${Math.round(m.context_length / 1024)}K`
+                              : String(m.context_length)}
+                        </td>
+                        <td style={{ padding: "12px 16px", verticalAlign: "middle", whiteSpace: "nowrap" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <Tag tone={m.enabled ? "green" : "gray"}>{m.enabled ? "已开启" : "已关闭"}</Tag>
+                          </div>
+                        </td>
+                        <td style={{ padding: "12px 16px", verticalAlign: "middle", whiteSpace: "nowrap" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <button
+                              type="button"
+                              data-testid={`model-edit-${m.id}`}
+                              onClick={() => openModelEditor(m)}
+                              style={miniBtn(false)}
+                            >
+                              编辑
+                            </button>
+                            <button
+                              type="button"
+                              data-testid={`model-toggle-${m.id}`}
+                              disabled={busyModel === m.id}
+                              onClick={() => setModelEnabled(m, !m.enabled)}
+                              style={miniBtn(false, busyModel === m.id)}
+                            >
+                              {m.enabled ? "关闭" : "开启"}
+                            </button>
+                            <button
+                              type="button"
+                              data-testid={`model-delete-${m.id}`}
+                              onClick={() => setModelDelete(m)}
+                              style={miniBtn(true)}
+                            >
+                              删除
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {modelsData && modelsData.models.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} style={{ padding: "28px 16px", textAlign: "center", color: SUBTLE, fontSize: 13 }}>
+                        暂无模型，点击右上角「添加模型」开始配置
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </Card>
+
+            <div style={{ fontSize: 11.5, color: SUBTLE, marginTop: 12, lineHeight: 1.7 }}>
+              模型配置与系统提示词、工具开关一样**按请求生效**：在对话界面的模型下拉框切换后，
+              下一条消息即由新模型处理。关闭某个模型只会让它从下拉框消失，不影响已有历史消息。
+              API Key 留空表示沿用现有配置（首次配置留空则回落到服务端环境变量）。
+            </div>
+          </>
+        )}
       </main>
+
+      {/* ==================== 编辑渠道凭证弹窗 ==================== */}
+      <Modal
+        open={!!channelEdit}
+        onClose={() => setChannelEdit(null)}
+        title={`编辑渠道凭证 · ${channelEdit?.label ?? ""}`}
+        width="480px"
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div>
+            <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "#334155", marginBottom: 6 }}>
+              飞书 App ID
+            </label>
+            <input
+              value={channelAppId}
+              onChange={(e) => setChannelAppId(e.target.value)}
+              placeholder="cli_xxxxxxxxxxxxxxxx"
+              style={{
+                width: "100%",
+                padding: "10px 12px",
+                borderRadius: 8,
+                border: "1px solid #E2E8F0",
+                fontSize: 13.5,
+                color: "#0F172A",
+                boxSizing: "border-box",
+                outline: "none",
+              }}
+            />
+          </div>
+          <div>
+            <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "#334155", marginBottom: 6 }}>
+              飞书 App Secret
+            </label>
+            <input
+              type="password"
+              value={channelAppSecret}
+              onChange={(e) => setChannelAppSecret(e.target.value)}
+              placeholder="输入新的 App Secret"
+              style={{
+                width: "100%",
+                padding: "10px 12px",
+                borderRadius: 8,
+                border: "1px solid #E2E8F0",
+                fontSize: 13.5,
+                color: "#0F172A",
+                boxSizing: "border-box",
+                outline: "none",
+              }}
+            />
+          </div>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              padding: "10px 12px",
+              borderRadius: 8,
+              background: "#F8FAFC",
+            }}
+          >
+            <span style={{ fontSize: 12, color: MUTED, lineHeight: 1.5 }}>
+              搜通讯录需用户授权，token 失效或需换账号时可重新授权
+            </span>
+            <button
+              type="button"
+              data-testid="channel-reauth"
+              onClick={reauthorizeChannel}
+              style={{
+                padding: "6px 14px",
+                borderRadius: 8,
+                fontSize: 12,
+                fontWeight: 600,
+                fontFamily: "inherit",
+                cursor: "pointer",
+                border: "1px solid #C7D2FE",
+                background: "#EEF2FF",
+                color: "#4338CA",
+                whiteSpace: "nowrap",
+              }}
+            >
+              重新授权
+            </button>
+          </div>
+          {channelError && (
+            <div style={{ padding: "10px 12px", borderRadius: 8, background: "#FEF2F2", color: "#DC2626", fontSize: 13 }}>
+              {channelError}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              onClick={() => setChannelEdit(null)}
+              style={{
+                padding: "8px 16px",
+                borderRadius: 8,
+                fontSize: 13,
+                fontWeight: 600,
+                fontFamily: "inherit",
+                cursor: "pointer",
+                border: `1px solid ${BORDER}`,
+                background: "#fff",
+                color: MUTED,
+              }}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              data-testid="channel-save"
+              onClick={saveChannelCredentials}
+              disabled={channelSaving}
+              style={{
+                padding: "8px 18px",
+                borderRadius: 8,
+                fontSize: 13,
+                fontWeight: 600,
+                fontFamily: "inherit",
+                cursor: channelSaving ? "wait" : "pointer",
+                border: "none",
+                background: PRIMARY,
+                color: "#fff",
+                opacity: channelSaving ? 0.6 : 1,
+              }}
+            >
+              {channelSaving ? "保存中…" : "保存"}
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* ==================== 编辑/新增记忆弹窗 ==================== */}
+      <Modal
+        open={!!memoryEdit}
+        onClose={() => setMemoryEdit(null)}
+        title={memoryEdit?.key ? `编辑记忆 · ${memoryEdit.key}` : "新增记忆"}
+        width="560px"
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div>
+            <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "#334155", marginBottom: 6 }}>
+              记忆的 Key
+            </label>
+            <input
+              value={memoryEditKey}
+              onChange={(e) => setMemoryEditKey(e.target.value)}
+              placeholder="如 user_name、user_favorite_color"
+              style={{
+                width: "100%",
+                padding: "10px 12px",
+                borderRadius: 8,
+                border: "1px solid #E2E8F0",
+                fontSize: 13.5,
+                color: "#0F172A",
+                boxSizing: "border-box",
+                outline: "none",
+              }}
+            />
+          </div>
+          <div>
+            <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "#334155", marginBottom: 6 }}>
+              记忆内容
+            </label>
+            <textarea
+              value={memoryEditValue}
+              onChange={(e) => setMemoryEditValue(e.target.value)}
+              rows={5}
+              placeholder="记忆的内容，跨会话持久保存"
+              style={{
+                width: "100%",
+                padding: "10px 12px",
+                borderRadius: 8,
+                border: "1px solid #E2E8F0",
+                fontSize: 13.5,
+                lineHeight: 1.6,
+                color: "#0F172A",
+                boxSizing: "border-box",
+                outline: "none",
+                resize: "vertical",
+              }}
+            />
+          </div>
+          {memoryError && (
+            <div style={{ padding: "10px 12px", borderRadius: 8, background: "#FEF2F2", color: "#DC2626", fontSize: 13 }}>
+              {memoryError}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              onClick={() => setMemoryEdit(null)}
+              style={{
+                padding: "8px 16px",
+                borderRadius: 8,
+                fontSize: 13,
+                fontWeight: 600,
+                fontFamily: "inherit",
+                cursor: "pointer",
+                border: `1px solid ${BORDER}`,
+                background: "#fff",
+                color: MUTED,
+              }}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              data-testid="memory-save"
+              onClick={saveMemory}
+              disabled={memorySaving}
+              style={{
+                padding: "8px 18px",
+                borderRadius: 8,
+                fontSize: 13,
+                fontWeight: 600,
+                fontFamily: "inherit",
+                cursor: memorySaving ? "wait" : "pointer",
+                border: "none",
+                background: PRIMARY,
+                color: "#fff",
+                opacity: memorySaving ? 0.6 : 1,
+              }}
+            >
+              {memorySaving ? "保存中…" : "保存"}
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* ==================== 删除记忆确认弹窗 ==================== */}
+      <Modal
+        open={!!memoryDelete}
+        onClose={() => setMemoryDelete(null)}
+        title="删除记忆"
+        width="440px"
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <p style={{ fontSize: 13.5, color: "#334155", lineHeight: 1.7, margin: 0 }}>
+            确定要删除记忆 <code style={{ background: "#F1F5F9", padding: "1px 6px", borderRadius: 4 }}>{memoryDelete?.key}</code> 吗？
+            删除后无法恢复。
+          </p>
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              onClick={() => setMemoryDelete(null)}
+              style={{
+                padding: "8px 16px",
+                borderRadius: 8,
+                fontSize: 13,
+                fontWeight: 600,
+                fontFamily: "inherit",
+                cursor: "pointer",
+                border: `1px solid ${BORDER}`,
+                background: "#fff",
+                color: MUTED,
+              }}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              data-testid="memory-delete-confirm"
+              onClick={confirmDeleteMemory}
+              disabled={memoryDeleting}
+              style={{
+                padding: "8px 18px",
+                borderRadius: 8,
+                fontSize: 13,
+                fontWeight: 600,
+                fontFamily: "inherit",
+                cursor: memoryDeleting ? "wait" : "pointer",
+                border: "none",
+                background: "#DC2626",
+                color: "#fff",
+                opacity: memoryDeleting ? 0.6 : 1,
+              }}
+            >
+              {memoryDeleting ? "删除中…" : "删除"}
+            </button>
+          </div>
+        </div>
+      </Modal>
 
       {/* ==================== 编辑 SKILL.md 弹窗 ==================== */}
       <Modal
@@ -2700,6 +4083,619 @@ export default function AgentPanelDashboard() {
                 }}
               >
                 {mcpDeleting ? "删除中…" : "确认删除"}
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </Modal>
+
+      {/* ==================== 编辑/新增模型弹窗 ==================== */}
+      <Modal
+        open={!!modelDraft}
+        onClose={() => {
+          if (modelSaving) return;
+          setModelDraft(null);
+        }}
+        title={modelEdit ? `编辑模型 · ${modelEdit.name}` : "添加模型"}
+        width="560px"
+      >
+        {modelDraft ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div>
+              <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "#334155", marginBottom: 6 }}>
+                模型 ID <span style={{ color: "#DC2626" }}>*</span>
+              </label>
+              <input
+                data-testid="model-field-id"
+                value={modelDraft.id}
+                disabled={!!modelEdit}
+                onChange={(e) => setModelDraft({ ...modelDraft, id: e.target.value })}
+                placeholder="如 deepseek-flash"
+                style={{
+                  width: "100%",
+                  padding: "10px 12px",
+                  borderRadius: 8,
+                  border: "1px solid #E2E8F0",
+                  fontSize: 13.5,
+                  color: "#0F172A",
+                  boxSizing: "border-box",
+                  outline: "none",
+                  background: modelEdit ? "#F8FAFC" : "#fff",
+                }}
+              />
+              <div style={{ fontSize: 11.5, color: SUBTLE, marginTop: 5 }}>
+                仅支持字母、数字、连字符、下划线；创建后不可修改
+              </div>
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "#334155", marginBottom: 6 }}>
+                模型名称（传给供应商的 model 名） <span style={{ color: "#DC2626" }}>*</span>
+              </label>
+              <input
+                data-testid="model-field-name"
+                value={modelDraft.name}
+                onChange={(e) => setModelDraft({ ...modelDraft, name: e.target.value })}
+                placeholder="如 deepseek-flash"
+                style={{
+                  width: "100%",
+                  padding: "10px 12px",
+                  borderRadius: 8,
+                  border: "1px solid #E2E8F0",
+                  fontSize: 13.5,
+                  color: "#0F172A",
+                  boxSizing: "border-box",
+                  outline: "none",
+                }}
+              />
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "#334155", marginBottom: 6 }}>
+                API 地址（base_url） <span style={{ color: "#DC2626" }}>*</span>
+              </label>
+              <input
+                data-testid="model-field-base-url"
+                value={modelDraft.base_url}
+                onChange={(e) => setModelDraft({ ...modelDraft, base_url: e.target.value })}
+                placeholder="https://api.deepseek.com/v1"
+                style={{
+                  width: "100%",
+                  padding: "10px 12px",
+                  borderRadius: 8,
+                  border: "1px solid #E2E8F0",
+                  fontSize: 13.5,
+                  color: "#0F172A",
+                  boxSizing: "border-box",
+                  outline: "none",
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+                }}
+              />
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "#334155", marginBottom: 6 }}>
+                模型 Key
+              </label>
+              <input
+                data-testid="model-field-api-key"
+                type="password"
+                value={modelDraft.api_key}
+                onChange={(e) => setModelDraft({ ...modelDraft, api_key: e.target.value })}
+                placeholder={
+                  modelEdit?.key_configured
+                    ? "••••••••（留空表示不修改）"
+                    : "留空则使用服务端环境变量 OPENAI_API_KEY"
+                }
+                style={{
+                  width: "100%",
+                  padding: "10px 12px",
+                  borderRadius: 8,
+                  border: "1px solid #E2E8F0",
+                  fontSize: 13.5,
+                  color: "#0F172A",
+                  boxSizing: "border-box",
+                  outline: "none",
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+                }}
+              />
+              <div style={{ fontSize: 11.5, color: SUBTLE, marginTop: 5 }}>
+                {modelEdit
+                  ? modelEdit.key_from_env
+                    ? "当前 Key 来自服务端环境变量；填写后将改为独立配置"
+                    : "当前已配置独立 Key；留空表示保持原值"
+                  : "留空表示不单独配置，沿用服务端环境变量"}
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 20, alignItems: "flex-start", flexWrap: "wrap" }}>
+              <div style={{ flex: "0 0 auto" }}>
+                <label
+                  style={{ display: "block", fontSize: 13, fontWeight: 600, color: "#334155", marginBottom: 8 }}
+                >
+                  是否支持图片识别
+                </label>
+                <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                  <Switch
+                    checked={modelDraft.vision}
+                    onChange={(v) => setModelDraft({ ...modelDraft, vision: v })}
+                  />
+                  <span style={{ fontSize: 12.5, color: MUTED }}>
+                    {modelDraft.vision ? "多模态（可传图片）" : "纯文本"}
+                  </span>
+                </div>
+              </div>
+              <div style={{ flex: 1, minWidth: 200 }}>
+                <label
+                  style={{ display: "block", fontSize: 13, fontWeight: 600, color: "#334155", marginBottom: 6 }}
+                >
+                  上下文长度（token）
+                </label>
+                <input
+                  data-testid="model-field-context"
+                  type="number"
+                  min={1}
+                  value={modelDraft.context_length}
+                  onChange={(e) => setModelDraft({ ...modelDraft, context_length: e.target.value })}
+                  placeholder="1048576"
+                  style={{
+                    width: "100%",
+                    padding: "10px 12px",
+                    borderRadius: 8,
+                    border: "1px solid #E2E8F0",
+                    fontSize: 13.5,
+                    color: "#0F172A",
+                    boxSizing: "border-box",
+                    outline: "none",
+                  }}
+                />
+                <div style={{ fontSize: 11.5, color: SUBTLE, marginTop: 5 }}>默认 1048576 = 1M</div>
+              </div>
+            </div>
+            {modelError && (
+              <div
+                data-testid="model-error"
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 8,
+                  background: "#FEF2F2",
+                  color: "#DC2626",
+                  fontSize: 13,
+                }}
+              >
+                {modelError}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                onClick={() => setModelDraft(null)}
+                disabled={modelSaving}
+                style={{
+                  padding: "9px 16px",
+                  borderRadius: 10,
+                  fontWeight: 600,
+                  fontSize: 13,
+                  border: `1px solid ${BORDER}`,
+                  cursor: modelSaving ? "not-allowed" : "pointer",
+                  fontFamily: "inherit",
+                  background: "#fff",
+                  color: MUTED,
+                }}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                data-testid="model-save"
+                onClick={saveModel}
+                disabled={modelSaving}
+                style={{
+                  padding: "9px 18px",
+                  borderRadius: 10,
+                  fontWeight: 600,
+                  fontSize: 13,
+                  border: "none",
+                  fontFamily: "inherit",
+                  background: PRIMARY,
+                  color: "#fff",
+                  cursor: modelSaving ? "not-allowed" : "pointer",
+                  opacity: modelSaving ? 0.6 : 1,
+                }}
+              >
+                {modelSaving ? "保存中…" : modelEdit ? "保存" : "添加"}
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </Modal>
+
+      {/* ==================== 用量统计（token 消耗） ==================== */}
+      {tab === "usage" && (
+        <div style={{ marginTop: 4 }}>
+          {/* 口径切换 + 说明 */}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+            <div style={{ display: "inline-flex", border: `1px solid ${BORDER}`, borderRadius: 9, overflow: "hidden" }}>
+              {(["all", "today"] as const).map((sc) => (
+                <button
+                  key={sc}
+                  data-testid={`usage-scope-${sc}`}
+                  onClick={() => {
+                    setUsageScope(sc);
+                    loadTokenUsage(sc);
+                  }}
+                  style={{
+                    padding: "7px 16px",
+                    fontSize: 12.5,
+                    fontWeight: usageScope === sc ? 600 : 400,
+                    fontFamily: "inherit",
+                    border: "none",
+                    cursor: "pointer",
+                    background: usageScope === sc ? PRIMARY : "#fff",
+                    color: usageScope === sc ? "#fff" : MUTED,
+                  }}
+                >
+                  {sc === "all" ? "累计" : "今日"}
+                </button>
+              ))}
+            </div>
+            <button
+              data-testid="usage-refresh"
+              onClick={() => loadTokenUsage(usageScope)}
+              disabled={usageLoading}
+              style={{
+                padding: "7px 14px",
+                borderRadius: 8,
+                fontSize: 12.5,
+                fontWeight: 600,
+                fontFamily: "inherit",
+                border: `1px solid ${BORDER}`,
+                background: "#fff",
+                color: TEXT,
+                cursor: usageLoading ? "not-allowed" : "pointer",
+                opacity: usageLoading ? 0.6 : 1,
+              }}
+            >
+              {usageLoading ? "刷新中…" : "刷新"}
+            </button>
+            <span style={{ fontSize: 11.5, color: SUBTLE, lineHeight: 1.6 }}>
+              口径：agent_metrics 全表求和（真实用量优先，供应商未回时按字符数估算）。
+            </span>
+          </div>
+
+          {!usageData ? (
+            <div style={{ ...CARD, padding: 40, textAlign: "center", color: MUTED, fontSize: 13 }}>
+              {usageLoading ? "加载中…" : "暂无数据"}
+            </div>
+          ) : (
+            <>
+              {/* 总量卡 */}
+              <div
+                data-testid="usage-totals"
+                style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 16 }}
+              >
+                {[
+                  { k: "总 token", v: usageData.totals.total_tokens, c: PRIMARY },
+                  { k: "输入 token", v: usageData.totals.prompt_tokens, c: "#0F6E56" },
+                  { k: "输出 token", v: usageData.totals.completion_tokens, c: "#BA7517" },
+                  { k: "对话轮数", v: usageData.totals.turns, c: "#534AB7" },
+                ].map((it) => (
+                  <div key={it.k} style={{ ...CARD, padding: "16px 18px" }}>
+                    <div style={{ fontSize: 11.5, color: MUTED, marginBottom: 6 }}>{it.k}</div>
+                    <div
+                      data-testid={`usage-total-${it.k}`}
+                      style={{ fontSize: 22, fontWeight: 600, color: it.c, fontVariantNumeric: "tabular-nums" }}
+                    >
+                      {it.v.toLocaleString()}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* 按用户明细 */}
+              <div style={{ ...CARD, padding: 0, overflow: "hidden" }}>
+                <div
+                  style={{
+                    padding: "13px 18px",
+                    borderBottom: `1px solid ${BORDER}`,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 12,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <div style={{ fontSize: 13.5, fontWeight: 600, color: TEXT }}>
+                    按用户统计
+                    <span style={{ fontSize: 11.5, fontWeight: 400, color: MUTED, marginLeft: 8 }}>
+                      共 {usageData.user_count} 个用户
+                    </span>
+                  </div>
+                  <div
+                    data-testid="usage-selfcheck"
+                    style={{
+                      fontSize: 11.5,
+                      padding: "4px 10px",
+                      borderRadius: 6,
+                      fontWeight: 600,
+                      background: usageData.self_check.consistent ? "#EAF3DE" : "#FCEBEB",
+                      color: usageData.self_check.consistent ? "#3B6D11" : "#A32D2D",
+                    }}
+                  >
+                    {usageData.self_check.consistent
+                      ? `合计一致 · ${usageData.self_check.users_sum.toLocaleString()} = 总量`
+                      : `⚠️ 合计 ${usageData.self_check.users_sum.toLocaleString()} ≠ 总量 ${usageData.self_check.grand_total.toLocaleString()}`}
+                  </div>
+                </div>
+
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+                    <thead>
+                      <tr style={{ background: "#F8FAFC", color: MUTED }}>
+                        {["用户", "角色", "总 token", "占比", "本月额度", "输入", "输出", "轮数", "工具调用", "最近使用"].map((h) => (
+                          <th
+                            key={h}
+                            style={{
+                              textAlign: h === "用户" || h === "角色" || h === "最近使用" ? "left" : "right",
+                              padding: "9px 14px",
+                              fontWeight: 600,
+                              fontSize: 11.5,
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {h}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {usageData.users.length === 0 ? (
+                        <tr>
+                          <td colSpan={10} style={{ padding: 28, textAlign: "center", color: SUBTLE }}>
+                            暂无消耗记录
+                          </td>
+                        </tr>
+                      ) : (
+                        usageData.users.map((u, i) => (
+                          <tr
+                            key={`${u.phone}-${u.name}-${i}`}
+                            data-testid={`usage-row-${i}`}
+                            style={{ borderTop: `1px solid ${BORDER}` }}
+                          >
+                            <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>
+                              <span style={{ fontWeight: 500, color: u.known ? TEXT : SUBTLE }}>{u.name}</span>
+                              {u.phone ? (
+                                <span style={{ color: SUBTLE, marginLeft: 6, fontSize: 11 }}>{u.phone}</span>
+                              ) : null}
+                            </td>
+                            <td style={{ padding: "10px 14px", color: MUTED, whiteSpace: "nowrap" }}>
+                              {u.role_name || "—"}
+                            </td>
+                            <td
+                              style={{
+                                padding: "10px 14px",
+                                textAlign: "right",
+                                fontWeight: 600,
+                                color: TEXT,
+                                fontVariantNumeric: "tabular-nums",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {u.total_tokens.toLocaleString()}
+                            </td>
+                            <td style={{ padding: "10px 14px", textAlign: "right", whiteSpace: "nowrap" }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
+                                <div style={{ width: 56, height: 6, borderRadius: 3, background: "#F1EFE8", overflow: "hidden" }}>
+                                  <div
+                                    style={{
+                                      width: `${Math.min(100, u.percent)}%`,
+                                      height: "100%",
+                                      background: u.known ? PRIMARY : SUBTLE,
+                                    }}
+                                  />
+                                </div>
+                                <span style={{ color: MUTED, fontVariantNumeric: "tabular-nums", fontSize: 11.5 }}>
+                                  {u.percent.toFixed(2)}%
+                                </span>
+                              </div>
+                            </td>
+                            {/* 本月额度（每人各自）：进度条 + 已用/额度 */}
+                            <td
+                              data-testid={`usage-quota-${i}`}
+                              style={{ padding: "10px 14px", textAlign: "right", whiteSpace: "nowrap" }}
+                            >
+                              {!u.known ? (
+                                <span style={{ color: SUBTLE, fontSize: 11.5 }}>—</span>
+                              ) : u.quota_unlimited ? (
+                                <span style={{ color: MUTED, fontSize: 11.5 }}>不限额</span>
+                              ) : (
+                                <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
+                                  <div style={{ width: 56, height: 6, borderRadius: 3, background: "#F1EFE8", overflow: "hidden" }}>
+                                    <div
+                                      style={{
+                                        width: `${Math.min(100, u.quota_percent)}%`,
+                                        height: "100%",
+                                        background: u.quota_exceeded ? "#DC2626" : u.quota_percent >= 80 ? "#D97706" : "#0F6E56",
+                                      }}
+                                    />
+                                  </div>
+                                  <span
+                                    style={{
+                                      color: u.quota_exceeded ? "#DC2626" : MUTED,
+                                      fontSize: 11.5,
+                                      fontVariantNumeric: "tabular-nums",
+                                      fontWeight: u.quota_exceeded ? 600 : 400,
+                                    }}
+                                  >
+                                    {u.month_used.toLocaleString()} / {(u.quota / 10000).toLocaleString()}万
+                                    {u.quota_exceeded ? " · 已用完" : ""}
+                                  </span>
+                                </div>
+                              )}
+                            </td>
+                            <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                              {u.prompt_tokens.toLocaleString()}
+                            </td>
+                            <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                              {u.completion_tokens.toLocaleString()}
+                            </td>
+                            <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                              {u.turns}
+                            </td>
+                            <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                              {u.tool_calls}
+                            </td>
+                            <td style={{ padding: "10px 14px", color: SUBTLE, whiteSpace: "nowrap", fontSize: 11.5 }}>
+                              {u.last_ts ? u.last_ts.replace("T", " ").slice(0, 16) : "—"}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                    <tfoot>
+                      <tr
+                        data-testid="usage-footer"
+                        style={{ borderTop: `2px solid ${BORDER}`, background: "#F8FAFC", fontWeight: 600 }}
+                      >
+                        <td style={{ padding: "10px 14px", color: TEXT }} colSpan={2}>
+                          合计
+                        </td>
+                        <td style={{ padding: "10px 14px", textAlign: "right", color: PRIMARY, fontVariantNumeric: "tabular-nums" }}>
+                          {usageData.self_check.users_sum.toLocaleString()}
+                        </td>
+                        <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED }}>100%</td>
+                        {/* 本月额度列：合计无意义（每人是各自的额度），给一行说明 */}
+                        <td
+                          data-testid="usage-footer-quota"
+                          style={{ padding: "10px 14px", textAlign: "right", color: SUBTLE, fontSize: 11.5, fontWeight: 400 }}
+                        >
+                          每人各自
+                        </td>
+                        <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                          {usageData.users.reduce((s, u) => s + u.prompt_tokens, 0).toLocaleString()}
+                        </td>
+                        <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                          {usageData.users.reduce((s, u) => s + u.completion_tokens, 0).toLocaleString()}
+                        </td>
+                        <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                          {usageData.users.reduce((s, u) => s + u.turns, 0)}
+                        </td>
+                        <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                          {usageData.users.reduce((s, u) => s + u.tool_calls, 0)}
+                        </td>
+                        <td style={{ padding: "10px 14px" }} />
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+
+                {usageData.users.some((u) => !u.known) ? (
+                  <div
+                    data-testid="usage-unknown-hint"
+                    style={{
+                      padding: "11px 18px",
+                      borderTop: `1px solid ${BORDER}`,
+                      fontSize: 11.5,
+                      lineHeight: 1.7,
+                      color: "#B45309",
+                      background: "#FFFBEB",
+                    }}
+                  >
+                    「未知用户」是启用归属记录之前的历史消耗（无法追溯是谁用的）。它计入总量，
+                    因此在人均表里也保留一行 —— 否则各行相加会小于总量。
+                  </div>
+                ) : null}
+              </div>
+
+              {usageData.totals.estimated_turns > 0 ? (
+                <div style={{ marginTop: 12, fontSize: 11.5, color: "#B45309", lineHeight: 1.7 }}>
+                  其中 {usageData.totals.estimated_turns} 轮的用量是<span style={{ fontWeight: 600 }}>按字符数估算</span>的
+                  （供应商未返回真实用量），与真实值有偏差。
+                </div>
+              ) : null}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ==================== 删除模型确认弹窗 ==================== */}
+      <Modal
+        open={!!modelDelete}
+        onClose={() => {
+          if (modelDeleting) return;
+          setModelDelete(null);
+        }}
+        title="删除模型"
+        width="460px"
+      >
+        {modelDelete ? (
+          <div>
+            <div style={{ fontSize: 13, color: TEXT, lineHeight: 1.7 }}>
+              确认删除模型{" "}
+              <code
+                style={{
+                  fontSize: 12.5,
+                  fontWeight: 700,
+                  background: "#F1F5F9",
+                  padding: "2px 7px",
+                  borderRadius: 5,
+                  color: TEXT,
+                }}
+              >
+                {modelDelete.name}
+              </code>
+              （{modelDelete.id}）？删除后该模型不再出现在对话界面的模型下拉框中。
+            </div>
+            {modelsData?.selected === modelDelete.id ? (
+              <div
+                style={{
+                  marginTop: 10,
+                  padding: "9px 12px",
+                  borderRadius: 9,
+                  fontSize: 12,
+                  lineHeight: 1.6,
+                  background: "#FFFBEB",
+                  border: "1px solid #FDE68A",
+                  color: "#B45309",
+                }}
+              >
+                这是当前默认模型，删除后会自动切换到其它已开启的模型。
+              </div>
+            ) : null}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}>
+              <button
+                type="button"
+                onClick={() => setModelDelete(null)}
+                disabled={modelDeleting}
+                style={{
+                  padding: "9px 16px",
+                  borderRadius: 10,
+                  fontWeight: 600,
+                  fontSize: 13,
+                  border: `1px solid ${BORDER}`,
+                  cursor: modelDeleting ? "not-allowed" : "pointer",
+                  fontFamily: "inherit",
+                  background: "#fff",
+                  color: MUTED,
+                }}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                data-testid="model-delete-confirm"
+                onClick={confirmDeleteModel}
+                disabled={modelDeleting}
+                style={{
+                  padding: "9px 18px",
+                  borderRadius: 10,
+                  fontWeight: 600,
+                  fontSize: 13,
+                  border: "none",
+                  fontFamily: "inherit",
+                  background: "#DC2626",
+                  color: "#fff",
+                  cursor: modelDeleting ? "not-allowed" : "pointer",
+                  opacity: modelDeleting ? 0.55 : 1,
+                }}
+              >
+                {modelDeleting ? "删除中…" : "确认删除"}
               </button>
             </div>
           </div>

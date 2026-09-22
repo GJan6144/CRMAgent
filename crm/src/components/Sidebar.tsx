@@ -158,6 +158,17 @@ export default function Sidebar({ activeItem }: SidebarProps) {
         </svg>
       ),
     },
+    {
+      key: "schedules",
+      label: "Agent 定时任务",
+      href: "/schedules",
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="10" />
+          <polyline points="12 6 12 12 16 14" />
+        </svg>
+      ),
+    },
   ];
 
   // 根据角色权限过滤导航项

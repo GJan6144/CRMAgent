@@ -45,6 +45,8 @@ export interface LeadQuery {
   endDate?: string;
   name?: string;
   phone?: string;
+  /** 跟进人模糊搜索 */
+  assignee?: string;
   source?: string;
   priority?: Priority | "";
 }

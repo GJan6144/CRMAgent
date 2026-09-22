@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import type { Lead, LeadListResponse, Priority, CreateLeadRequest } from "@/types/lead";
 import { usePermission } from "@/hooks/usePermission";
 import Sidebar from "./Sidebar";
@@ -25,7 +25,9 @@ const AVATAR_COLORS = [
 
 const SOURCE_OPTIONS = ["官网咨询", "百度推广", "展会活动", "朋友圈广告", "转介绍", "行业峰会"];
 
-const ASSIGNEE_OPTIONS = ["李思琪", "陈伟杰", "赵雪梅", "孙雅文", "周晨阳"];
+// ⚠️ 跟进人选项已改为从 /api/accounts 动态读取真实销售
+//    （原硬编码 ["李思琪",...] 与 leads.json 的实际 assignee 完全不匹配，
+//      导致新增线索挂到不存在的"幽灵销售"名下，且「仅自己」用户永远选不到自己 → 必被 403）
 
 /* ========== 输入框样式 ========== */
 const INPUT_STYLE: React.CSSProperties = {
@@ -35,7 +37,7 @@ const INPUT_STYLE: React.CSSProperties = {
   fontSize: 13,
   fontFamily: "inherit",
   color: "#1E293B",
-  background: "#fff",
+  backgroundColor: "#fff",
   outline: "none",
   width: "100%",
   boxSizing: "border-box",
@@ -97,6 +99,7 @@ export default function LeadsDashboard() {
     ...defaultDateRange(),
     name: "",
     phone: "",
+    assignee: "",
     source: "",
     priority: "",
   });
@@ -107,19 +110,108 @@ export default function LeadsDashboard() {
   const [deleteLead, setDeleteLead] = useState<Lead | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
 
-  // ---- 编辑表单数据 ----
+  // ---- 表单数据 ----
   const [editForm, setEditForm] = useState({ name: "", phone: "", priority: "" as Priority | "", source: "", assignee: "" });
-  const [addForm, setAddForm] = useState<CreateLeadRequest>({ name: "", phone: "", priority: "medium", source: "官网咨询", assignee: "李思琪" });
+  const [addForm, setAddForm] = useState<CreateLeadRequest>({ name: "", phone: "", priority: "medium", source: "官网咨询", assignee: "" });
+
+  /**
+   * 可选跟进人。
+   *
+   * ⚠️ 原实现是硬编码常量 = ["李思琪", "陈伟杰", "赵雪梅", "孙雅文", "周晨阳"]，
+   *    但这 5 个名字**在 leads.json 里一个都不存在**（真实 assignee 是
+   *    张明/李华/王芳/刘强/陈静）→ 新增的线索直接挂到"幽灵销售"名下，
+   *    且「仅自己」的销售无论如何都选不到自己，必然被服务端 403 拒绝。
+   *    改为从账号数据动态读取真实销售。
+   */
+  const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
+
+  // 受限用户（仅自己）的跟进人只能是本人
+  const defaultAssignee = perm.restricted ? perm.currentUserName : "";
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/accounts", { cache: "no-store" });
+        const data = await res.json();
+        const list = Array.isArray(data) ? data : data?.data ?? [];
+        // 只取销售角色的账号名（管理员不应作为线索跟进人）
+        const names: string[] = list
+          .filter((a: { roleId?: string; roleName?: string; name?: string }) =>
+            a.name && (a.roleName === "销售" || a.roleId === "ROLE-2026-0002"))
+          .map((a: { name: string }) => a.name);
+        // 兜底：接口异常时退回空列表，交给下面的「受限锁本人」逻辑
+        setAssigneeOptions(names.length ? names : []);
+      } catch {
+        setAssigneeOptions([]);
+      }
+    })();
+  }, []);
+
+  // 受限用户只给一个选项（本人）；不受限用户给全部销售
+  const effectiveAssigneeOptions = useMemo(
+    () => (perm.restricted && perm.currentUserName ? [perm.currentUserName] : assigneeOptions),
+    [perm.restricted, perm.currentUserName, assigneeOptions]
+  );
+
+  /**
+   * 新增表单的跟进人默认值。
+   *
+   * ⚠️⚠️ 这里**必须用派生值 + useState 初始化，绝不能用 useEffect 去 setAddForm**。
+   *    曾经的写法是：
+   *      useEffect(() => { ... setAddForm(...) }, [..., effectiveAssigneeOptions, addForm.assignee])
+   *    而 `effectiveAssigneeOptions` 每次渲染都是新数组 → 依赖恒变 → effect 反复执行
+   *    → setAddForm 触发重渲染 → 数组又变 → **无限循环**。
+   *    现象是页面永远停在「加载中...」并疯狂重复请求（React 报
+   *    "Maximum update depth exceeded"）。
+   *
+   *    正确做法：默认值只在「打开新增弹窗」和「用户改过之后」这两个时机写，
+   *    其余时候用计算值兜底，不产生额外的 setState。
+   */
+  const addAssignee = perm.restricted && perm.currentUserName
+    ? perm.currentUserName
+    : (addForm.assignee || (assigneeOptions.length ? assigneeOptions[0] : ""));
+
+  // 打开新增弹窗时，把跟进人重置为当前应取的默认值（唯一写 addForm.assignee 的时机之一）
+  const openAddModal = useCallback(() => {
+    setAddForm((f) => ({
+      ...f,
+      assignee: perm.restricted && perm.currentUserName
+        ? perm.currentUserName
+        : (assigneeOptions.length ? assigneeOptions[0] : ""),
+    }));
+    setShowAddModal(true);
+  }, [perm.restricted, perm.currentUserName, assigneeOptions]);
 
   // ---- 数据加载 ----
+  /**
+   * ⚠️⚠️ 依赖数组里**绝不能放 `perm` 对象本身**。
+   *
+   * `usePermission()` 返回的是**每次渲染都新建的对象字面量**（不是 useMemo 的稳定引用），
+   * 把它放进 useCallback 依赖 → 依赖恒变 → `useEffect(() => fetchLeads(), [fetchLeads])`
+   * 每轮渲染都重新执行 → setLoading/setLeads 触发重渲染 → **无限循环**。
+   * 现象：页面永远停在「加载中...」，Network 里同一请求疯狂重复。
+   * （React 会报 "Maximum update depth exceeded"。）
+   *
+   * → 依赖只取**稳定的原始值**：身份三要素（字符串）。
+   */
+  const identityName = perm.currentUserName;
+  const identityPhone = perm.scopePhone;
+  const identityRoleId = perm.scopeRoleId;
+
   const fetchLeads = useCallback(async () => {
     setLoading(true);
     try {
+      // ★ 带上「我是谁」→ 服务端据此读 roles.json 自算数据范围
+      //    （「仅自己」时只返回 assignee === 本人 的线索）
       const params = new URLSearchParams();
+      if (identityName) params.set("user_name", identityName);
+      if (identityPhone) params.set("user_phone", identityPhone);
+      if (identityRoleId) params.set("role_id", identityRoleId);
       if (filters.startDate) params.set("startDate", filters.startDate);
       if (filters.endDate) params.set("endDate", filters.endDate);
       if (filters.name) params.set("name", filters.name);
       if (filters.phone) params.set("phone", filters.phone);
+      if (filters.assignee) params.set("assignee", filters.assignee);
       if (filters.source) params.set("source", filters.source);
       if (filters.priority) params.set("priority", filters.priority);
       params.set("page", String(page));
@@ -135,7 +227,7 @@ export default function LeadsDashboard() {
     } finally {
       setLoading(false);
     }
-  }, [filters, page, pageSize]);
+  }, [filters, page, pageSize, identityName, identityPhone, identityRoleId]);
 
   useEffect(() => { fetchLeads(); }, [fetchLeads]);
 
@@ -147,7 +239,7 @@ export default function LeadsDashboard() {
   // ---- 详情 ----
   const openDetail = async (lead: Lead) => {
     try {
-      const res = await fetch(`/api/leads/${lead.id}`);
+      const res = await fetch(`/api/leads/${lead.id}?${perm.scopeParams().toString()}`);
       const data = await res.json();
       setDetailLead(data);
     } catch {
@@ -158,7 +250,7 @@ export default function LeadsDashboard() {
   // ---- 编辑 ----
   const openEdit = async (lead: Lead) => {
     try {
-      const res = await fetch(`/api/leads/${lead.id}`);
+      const res = await fetch(`/api/leads/${lead.id}?${perm.scopeParams().toString()}`);
       const data: Lead = await res.json();
       setEditLead(data);
       setEditForm({ name: data.name, phone: data.phone, priority: data.priority, source: data.source, assignee: data.assignee });
@@ -174,7 +266,7 @@ export default function LeadsDashboard() {
       alert("请填写完整信息");
       return;
     }
-    await fetch(`/api/leads/${editLead.id}`, {
+    await fetch(`/api/leads/${editLead.id}?${perm.scopeParams().toString()}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(editForm),
@@ -186,7 +278,7 @@ export default function LeadsDashboard() {
   // ---- 删除 ----
   const handleDeleteConfirm = async () => {
     if (!deleteLead) return;
-    await fetch(`/api/leads/${deleteLead.id}`, { method: "DELETE" });
+    await fetch(`/api/leads/${deleteLead.id}?${perm.scopeParams().toString()}`, { method: "DELETE" });
     setDeleteLead(null);
     setPage(1);
     fetchLeads();
@@ -194,17 +286,25 @@ export default function LeadsDashboard() {
 
   // ---- 新增 ----
   const handleAddSubmit = async () => {
-    if (!addForm.name || !addForm.phone || !addForm.priority || !addForm.source || !addForm.assignee) {
+    // ⚠️ 用派生值 addAssignee（不是 addForm.assignee）：受限用户的默认值不一定写进过 state
+    const payload = { ...addForm, assignee: addAssignee };
+    if (!payload.name || !payload.phone || !payload.priority || !payload.source || !payload.assignee) {
       alert("请填写完整信息");
       return;
     }
-    await fetch("/api/leads", {
+    const res = await fetch(`/api/leads?${perm.scopeParams().toString()}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(addForm),
+      body: JSON.stringify(payload),
     });
+    if (!res.ok) {
+      // ⚠️ 必须提示：服务端会拒绝「受限用户把线索挂到别人名下」，静默失败会让用户以为保存成功了
+      const err = await res.json().catch(() => ({}));
+      alert(err.error || "保存失败，请重试");
+      return;
+    }
     setShowAddModal(false);
-    setAddForm({ name: "", phone: "", priority: "medium", source: "官网咨询", assignee: "李思琪" });
+    setAddForm({ name: "", phone: "", priority: "medium", source: "官网咨询", assignee: "" });
     setPage(1);
     fetchLeads();
   };
@@ -221,7 +321,7 @@ export default function LeadsDashboard() {
           </div>
           {perm.canAdd && (
           <button
-            onClick={() => setShowAddModal(true)}
+            onClick={openAddModal}
             style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "10px 20px", borderRadius: 10, fontWeight: 600, fontSize: "13.5px", border: "none", cursor: "pointer", fontFamily: "inherit", lineHeight: 1, background: "#2563EB", color: "#fff" }}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16" strokeLinecap="round" strokeLinejoin="round">
@@ -253,6 +353,24 @@ export default function LeadsDashboard() {
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ fontSize: "12.5px", fontWeight: 500, color: "#64748B", whiteSpace: "nowrap" }}>电话</span>
             <input type="text" value={filters.phone} onChange={(e) => handleFilterChange("phone", e.target.value)} placeholder="请输入电话号码" style={{ padding: "7px 10px", border: "1px solid #E2E8F0", borderRadius: 8, fontSize: 13, fontFamily: "inherit", color: "#1E293B", background: "#fff", outline: "none", minWidth: 120, width: 130 }} />
+          </div>
+
+          {/* 跟进人（模糊搜索） */}
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: "12.5px", fontWeight: 500, color: "#64748B", whiteSpace: "nowrap" }}>跟进人</span>
+            <input
+              type="text"
+              data-testid="leads-filter-assignee"
+              value={filters.assignee}
+              onChange={(e) => handleFilterChange("assignee", e.target.value)}
+              placeholder="请输入跟进人"
+              list="leads-assignee-options"
+              style={{ padding: "7px 10px", border: "1px solid #E2E8F0", borderRadius: 8, fontSize: 13, fontFamily: "inherit", color: "#1E293B", background: "#fff", outline: "none", minWidth: 120, width: 130 }}
+            />
+            {/* 建议列表：来自真实销售账号；模糊匹配由后端 includes 完成，这里只做输入提示 */}
+            <datalist id="leads-assignee-options">
+              {effectiveAssigneeOptions.map((n) => (<option key={n} value={n} />))}
+            </datalist>
           </div>
 
           {/* 客户来源 */}
@@ -455,8 +573,18 @@ export default function LeadsDashboard() {
               </select>
             </FormField>
             <FormField label="跟进人">
-              <select value={editForm.assignee} onChange={(e) => setEditForm((f) => ({ ...f, assignee: e.target.value }))} style={SELECT_STYLE}>
-                {ASSIGNEE_OPTIONS.map((a) => (<option key={a} value={a}>{a}</option>))}
+              {/* 「仅自己」时只有本人一个选项（服务端也会 403 兜底） */}
+              <select
+                data-testid="lead-edit-assignee"
+                value={editForm.assignee}
+                disabled={perm.restricted}
+                onChange={(e) => setEditForm((f) => ({ ...f, assignee: e.target.value }))}
+                style={{ ...SELECT_STYLE, background: perm.restricted ? "#F8FAFC" : "#fff", cursor: perm.restricted ? "not-allowed" : "pointer" }}
+              >
+                {(effectiveAssigneeOptions.includes(editForm.assignee) || !editForm.assignee
+                  ? effectiveAssigneeOptions
+                  : [editForm.assignee, ...effectiveAssigneeOptions]
+                ).map((a) => (<option key={a} value={a}>{a}</option>))}
               </select>
             </FormField>
             <div style={{ display: "flex", gap: 10, marginTop: 24 }}>
@@ -512,9 +640,21 @@ export default function LeadsDashboard() {
             </select>
           </FormField>
           <FormField label="跟进人">
-            <select value={addForm.assignee} onChange={(e) => setAddForm((f) => ({ ...f, assignee: e.target.value }))} style={SELECT_STYLE}>
-              {ASSIGNEE_OPTIONS.map((a) => (<option key={a} value={a}>{a}</option>))}
+            {/* 「仅自己」时锁定为本人；服务端也会 403 兜底，防绕过 */}
+            <select
+              data-testid="lead-add-assignee"
+              value={addAssignee}
+              disabled={perm.restricted}
+              onChange={(e) => setAddForm((f) => ({ ...f, assignee: e.target.value }))}
+              style={{ ...SELECT_STYLE, backgroundColor: perm.restricted ? "#F8FAFC" : "#fff", cursor: perm.restricted ? "not-allowed" : "pointer" }}
+            >
+              {effectiveAssigneeOptions.map((a) => (<option key={a} value={a}>{a}</option>))}
             </select>
+            {perm.restricted && (
+              <div data-testid="lead-assignee-hint" style={{ fontSize: 11.5, color: "#64748B", marginTop: 4 }}>
+                当前权限仅能创建归属自己的线索，跟进人已锁定为本人
+              </div>
+            )}
           </FormField>
           <div style={{ display: "flex", gap: 10, marginTop: 24 }}>
             <button onClick={handleAddSubmit} style={{ flex: 1, padding: "10px 20px", borderRadius: 10, fontWeight: 600, fontSize: "13.5px", border: "none", background: "#2563EB", color: "#fff", cursor: "pointer", fontFamily: "inherit" }}>添加</button>

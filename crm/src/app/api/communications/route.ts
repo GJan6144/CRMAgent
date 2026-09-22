@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Communication, CommunicationQuery } from "@/types/communication";
 import { readCommunications } from "./utils";
+import { resolveCallerScope, filterByOwner } from "../_scope";
+import { readLeads } from "../leads/utils";
 
 /**
  * GET /api/communications - 获取沟通记录列表（支持筛选）
@@ -13,11 +15,30 @@ import { readCommunications } from "./utils";
  *   endDate    - 结束日期 (YYYY-MM-DD)
  *   page       - 页码（默认 1）
  *   pageSize   - 每页条数（默认 10）
+ *
+ * 数据范围：「仅自己」时的可见口径是**叠加**的（与 Agent 侧完全一致）——
+ *   `sender === 本人`  **或**  `leadId` 指向本人名下的线索。
+ * 只按 sender 过滤会漏掉「客户主动发来、sender 记为客户」的记录；
+ * 只按 leadId 过滤会漏掉「本人参与但线索已转出」的记录。
  */
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
 
-  const all = readCommunications();
+  // ★ 数据范围收口
+  const caller = resolveCallerScope(request, "communications");
+  let all = filterByOwner(readCommunications(), caller, ["sender"]);
+
+  // 叠加：本人名下线索的全部沟通记录（含 sender 为客户的那些）
+  if (caller.restricted && caller.user_name) {
+    const myLeadIds = new Set(
+      readLeads()
+        .filter((l) => l.assignee === caller.user_name)
+        .map((l) => l.id)
+    );
+    all = readCommunications().filter(
+      (c) => c.sender === caller.user_name || myLeadIds.has(c.leadId)
+    );
+  }
 
   const query: CommunicationQuery = {
     leadId: searchParams.get("leadId") ?? undefined,

@@ -1,8 +1,16 @@
 [
   {
+    "id": "ROLE-2026-0003",
+    "createdAt": "2026-09-22 00:30",
+    "name": "测试",
+    "monthlyTokenQuota": 1000000,
+    "permissions": []
+  },
+  {
     "id": "ROLE-2026-0001",
     "createdAt": "2026-06-01 00:00",
     "name": "管理员",
+    "monthlyTokenQuota": 1000000,
     "permissions": [
       {
         "pageKey": "dashboard",
@@ -113,6 +121,17 @@
           "删除"
         ],
         "dataScope": "全部"
+      },
+      {
+        "pageKey": "schedules",
+        "pageLabel": "Agent 定时任务",
+        "functions": [
+          "查看",
+          "修改",
+          "增加",
+          "删除"
+        ],
+        "dataScope": "全部"
       }
     ]
   },
@@ -120,6 +139,7 @@
     "id": "ROLE-2026-0002",
     "createdAt": "2026-06-01 00:00",
     "name": "销售",
+    "monthlyTokenQuota": 1000000,
     "permissions": [
       {
         "pageKey": "dashboard",
@@ -127,7 +147,7 @@
         "functions": [
           "查看"
         ],
-        "dataScope": "全部"
+        "dataScope": "仅自己"
       },
       {
         "pageKey": "leads",
@@ -137,7 +157,7 @@
           "修改",
           "增加"
         ],
-        "dataScope": "全部"
+        "dataScope": "仅自己"
       },
       {
         "pageKey": "products",
@@ -145,7 +165,7 @@
         "functions": [
           "查看"
         ],
-        "dataScope": "全部"
+        "dataScope": "仅自己"
       },
       {
         "pageKey": "orders",
@@ -154,7 +174,7 @@
           "查看",
           "修改"
         ],
-        "dataScope": "全部"
+        "dataScope": "仅自己"
       },
       {
         "pageKey": "communications",
@@ -162,31 +182,49 @@
         "functions": [
           "查看"
         ],
-        "dataScope": "全部"
+        "dataScope": "仅自己"
       },
       {
         "pageKey": "chat",
         "pageLabel": "AI 助手",
-        "functions": [
-          "查看"
-        ],
-        "dataScope": "全部"
+        "functions": [],
+        "dataScope": "仅自己"
       },
       {
         "pageKey": "kb",
         "pageLabel": "Agent 知识库",
-        "functions": [
-          "查看"
-        ],
-        "dataScope": "全部"
+        "functions": [],
+        "dataScope": "仅自己"
       },
       {
         "pageKey": "files",
         "pageLabel": "AI 生成文件管理",
-        "functions": [
-          "查看"
-        ],
-        "dataScope": "全部"
+        "functions": [],
+        "dataScope": "仅自己"
+      },
+      {
+        "pageKey": "schedules",
+        "pageLabel": "Agent 定时任务",
+        "functions": [],
+        "dataScope": "仅自己"
+      },
+      {
+        "pageKey": "agent",
+        "pageLabel": "Agent 控制面板",
+        "functions": [],
+        "dataScope": "仅自己"
+      },
+      {
+        "pageKey": "accounts",
+        "pageLabel": "账号管理",
+        "functions": [],
+        "dataScope": "仅自己"
+      },
+      {
+        "pageKey": "roles",
+        "pageLabel": "角色与权限",
+        "functions": [],
+        "dataScope": "仅自己"
       }
     ]
   }

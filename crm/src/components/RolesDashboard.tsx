@@ -2,10 +2,22 @@
 
 import { useState, useEffect, useCallback } from "react";
 import type { Role, RoleListResponse, PermissionItem, CreateRoleRequest } from "@/types/role";
-import { AVAILABLE_PAGES, AVAILABLE_FUNCTIONS, DATA_SCOPES } from "@/types/role";
+import { AVAILABLE_PAGES, AVAILABLE_FUNCTIONS, DATA_SCOPES, DEFAULT_MONTHLY_TOKEN_QUOTA, QUOTA_PRESETS, QUOTA_EXCEEDED_TEXT } from "@/types/role";
 import Sidebar from "./Sidebar";
 import Modal from "./Modal";
 import { usePermission } from "@/hooks/usePermission";
+
+/**
+ * 「数据权限」的语义补充说明（按页面给）。
+ * 目前只有「AI 助手」页需要 —— 它的数据权限不止影响页面展示，还会**约束 Agent
+ * 里所有 CRM 读写工具**的有效范围（服务端读同一份 roles.json 判定）。
+ */
+const PAGE_SCOPE_HINTS: Record<string, { 全部: string; 仅自己: string }> = {
+  chat: {
+    全部: "Agent 可读写全部 CRM 数据。",
+    仅自己: "Agent 仅能读写归属自己的 CRM 数据（新增自动归属自己，改/删他人数据会被拒绝）。",
+  },
+};
 
 /* ========== 输入框样式 ========== */
 const INPUT_STYLE: React.CSSProperties = {
@@ -37,20 +49,34 @@ function PermissionSettingsModal({
   permissions,
   onSave,
   roleName,
+  quota,
 }: {
   open: boolean;
   onClose: () => void;
   permissions: PermissionItem[];
-  onSave: (perms: PermissionItem[]) => void;
+  onSave: (perms: PermissionItem[], quota: number) => void;
   roleName: string;
+  quota: number;
 }) {
   const [localPerms, setLocalPerms] = useState<PermissionItem[]>([]);
+  const [quotaInput, setQuotaInput] = useState<string>(String(DEFAULT_MONTHLY_TOKEN_QUOTA));
 
   useEffect(() => {
     if (open) {
       setLocalPerms(JSON.parse(JSON.stringify(permissions)));
+      setQuotaInput(String(quota ?? DEFAULT_MONTHLY_TOKEN_QUOTA));
     }
-  }, [open, permissions]);
+  }, [open, permissions, quota]);
+
+  // 额度校验：空 → 默认值；非法/负数 → 报错；0 = 不限额
+  const quotaNum = Number(quotaInput);
+  const quotaValid =
+    quotaInput.trim() !== "" && Number.isFinite(quotaNum) && quotaNum >= 0 && Number.isInteger(quotaNum);
+
+  const handleSave = () => {
+    if (!quotaValid) return;
+    onSave(localPerms, quotaNum);
+  };
 
   const isPageSelected = (pageKey: string) => localPerms.some((p) => p.pageKey === pageKey);
 
@@ -182,40 +208,162 @@ function PermissionSettingsModal({
               </div>
 
               {/* 数据权限 */}
-              <div style={{ display: "flex", gap: 16, opacity: selected ? 1 : 0.4, pointerEvents: selected ? "auto" : "none" }}>
-                {DATA_SCOPES.map((scope) => (
-                  <label
-                    key={scope}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 5,
-                      cursor: "pointer",
-                      fontSize: 12,
-                      color: selected && perm?.dataScope === scope ? "#2563EB" : "#64748B",
-                      fontWeight: selected && perm?.dataScope === scope ? 600 : 400,
-                      userSelect: "none",
-                    }}
-                  >
-                    <input
-                      type="radio"
-                      name={`scope-${page.key}`}
-                      checked={perm?.dataScope === scope}
-                      onChange={() => setDataScope(page.key, scope)}
-                      disabled={!selected}
-                      style={{ width: 14, height: 14, accentColor: "#2563EB", cursor: selected ? "pointer" : "not-allowed" }}
-                    />
-                    {scope}
-                  </label>
-                ))}
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, opacity: selected ? 1 : 0.4, pointerEvents: selected ? "auto" : "none" }}>
+                <div style={{ display: "flex", gap: 16 }}>
+                  {DATA_SCOPES.map((scope) => (
+                    <label
+                      key={scope}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 5,
+                        cursor: "pointer",
+                        fontSize: 12,
+                        color: selected && perm?.dataScope === scope ? "#2563EB" : "#64748B",
+                        fontWeight: selected && perm?.dataScope === scope ? 600 : 400,
+                        userSelect: "none",
+                      }}
+                    >
+                      <input
+                        type="radio"
+                        name={`scope-${page.key}`}
+                        checked={perm?.dataScope === scope}
+                        onChange={() => setDataScope(page.key, scope)}
+                        disabled={!selected}
+                        style={{ width: 14, height: 14, accentColor: "#2563EB", cursor: selected ? "pointer" : "not-allowed" }}
+                      />
+                      {scope}
+                    </label>
+                  ))}
+                </div>
+                {/* 「AI 助手」的数据权限会同时约束 Agent 读写 CRM 数据的范围 */}
+                {PAGE_SCOPE_HINTS[page.key] && (
+                  <div data-testid={`scope-hint-${page.key}`} style={{ fontSize: 10.5, color: "#94A3B8", lineHeight: 1.5 }}>
+                    {PAGE_SCOPE_HINTS[page.key][perm?.dataScope === "全部" ? "全部" : "仅自己"]}
+                  </div>
+                )}
               </div>
             </div>
           );
         })}
       </div>
 
-      <div style={{ display: "flex", gap: 10, marginTop: 20, paddingTop: 16, borderTop: "1px solid #E2E8F0" }}>
-        <button onClick={() => onSave(localPerms)} style={{ flex: 1, padding: "10px 20px", borderRadius: 10, fontWeight: 600, fontSize: "13.5px", border: "none", background: "#2563EB", color: "#fff", cursor: "pointer", fontFamily: "inherit" }}>保存权限</button>
+      {/* 每月 token 额度（AI 助手） */}
+      <div
+        data-testid="role-quota-block"
+        style={{
+          marginTop: 16,
+          padding: "14px 16px",
+          borderRadius: 10,
+          background: "#F8FAFC",
+          border: "1px solid #E2E8F0",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: "#1E293B" }}>每月 token 额度</span>
+          <span style={{ fontSize: 11, color: "#94A3B8" }}>（每个用户各自，单位：token）</span>
+        </div>
+        <div style={{ fontSize: 11.5, color: "#64748B", lineHeight: 1.7, marginBottom: 10 }}>
+          该角色下<strong>每个用户</strong>每月可用于 AI 助手对话的 token 上限。超出后对话会被拦截并提示
+          「{QUOTA_EXCEEDED_TEXT}」。填 <strong>0</strong> 表示不限额。
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <input
+            data-testid="role-quota-input"
+            type="number"
+            min={0}
+            step={100000}
+            value={quotaInput}
+            onChange={(e) => setQuotaInput(e.target.value)}
+            style={{
+              width: 180,
+              padding: "8px 10px",
+              borderRadius: 8,
+              border: `1px solid ${quotaValid ? "#E2E8F0" : "#FCA5A5"}`,
+              fontSize: 13,
+              fontFamily: "inherit",
+              color: "#1E293B",
+              outline: "none",
+              background: "#fff",
+            }}
+          />
+          <span style={{ fontSize: 12, color: "#64748B" }}>
+            {quotaInput.trim() === ""
+              ? "请输入额度"
+              : Number(quotaInput) === 0
+              ? "不限额"
+              : `≈ ${(Number(quotaInput) / 10000).toLocaleString()} 万 token / 月 / 人`}
+          </span>
+
+          <div style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
+            {QUOTA_PRESETS.map((p) => (
+              <button
+                key={p.value}
+                data-testid={`role-quota-preset-${p.value}`}
+                onClick={() => setQuotaInput(String(p.value))}
+                style={{
+                  padding: "5px 10px",
+                  borderRadius: 999,
+                  fontSize: 11.5,
+                  fontWeight: Number(quotaInput) === p.value ? 600 : 400,
+                  border: `1px solid ${Number(quotaInput) === p.value ? "#2563EB" : "#E2E8F0"}`,
+                  background: Number(quotaInput) === p.value ? "#EFF6FF" : "#fff",
+                  color: Number(quotaInput) === p.value ? "#2563EB" : "#64748B",
+                  cursor: "pointer",
+                  fontFamily: "inherit",
+                }}
+              >
+                {p.label}
+              </button>
+            ))}
+            <button
+              data-testid="role-quota-unlimited-btn"
+              onClick={() => setQuotaInput("0")}
+              style={{
+                padding: "5px 10px",
+                borderRadius: 999,
+                fontSize: 11.5,
+                fontWeight: Number(quotaInput) === 0 ? 600 : 400,
+                border: `1px solid ${Number(quotaInput) === 0 ? "#2563EB" : "#E2E8F0"}`,
+                background: Number(quotaInput) === 0 ? "#EFF6FF" : "#fff",
+                color: Number(quotaInput) === 0 ? "#2563EB" : "#64748B",
+                cursor: "pointer",
+                fontFamily: "inherit",
+              }}
+            >
+              不限额
+            </button>
+          </div>
+        </div>
+
+        {!quotaValid && (
+          <div data-testid="role-quota-error" style={{ fontSize: 11.5, color: "#DC2626", marginTop: 8 }}>
+            请输入 ≥ 0 的整数（0 表示不限额）
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 10, marginTop: 20, paddingTop: 16, borderTop: "1px solid #E2E8F0", position: "sticky", bottom: 0, background: "#fff" }}>
+        <button
+          data-testid="role-perm-save"
+          onClick={handleSave}
+          disabled={!quotaValid}
+          style={{
+            flex: 1,
+            padding: "10px 20px",
+            borderRadius: 10,
+            fontWeight: 600,
+            fontSize: "13.5px",
+            border: "none",
+            background: quotaValid ? "#2563EB" : "#94A3B8",
+            color: "#fff",
+            cursor: quotaValid ? "pointer" : "not-allowed",
+            fontFamily: "inherit",
+          }}
+        >
+          保存权限
+        </button>
         <button onClick={onClose} style={{ flex: 1, padding: "10px 20px", borderRadius: 10, fontWeight: 600, fontSize: "13.5px", border: "1px solid #E2E8F0", background: "#fff", color: "#1E293B", cursor: "pointer", fontFamily: "inherit" }}>取消</button>
       </div>
     </Modal>
@@ -284,12 +432,12 @@ export default function RolesDashboard() {
   };
 
   // ---- 修改权限 ----
-  const handlePermSave = async (perms: PermissionItem[]) => {
+  const handlePermSave = async (perms: PermissionItem[], quota: number) => {
     if (!permRole) return;
     await fetch(`/api/roles/${permRole.id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ permissions: perms }),
+      body: JSON.stringify({ permissions: perms, monthlyTokenQuota: quota }),
     });
     setPermRole(null);
     fetchRoles();
@@ -410,6 +558,17 @@ export default function RolesDashboard() {
                               color="#D97706"
                             />
                           )}
+                          {/* 每月 token 额度（每人各自） */}
+                          <span data-testid={`role-quota-tag-${role.id}`}>
+                            <PermissionTag
+                              label={
+                                (role.monthlyTokenQuota ?? DEFAULT_MONTHLY_TOKEN_QUOTA) === 0
+                                  ? "额度:不限额"
+                                  : `额度:${(((role.monthlyTokenQuota ?? DEFAULT_MONTHLY_TOKEN_QUOTA) / 10000).toLocaleString())}万/月`
+                              }
+                              color="#7C3AED"
+                            />
+                          </span>
                         </div>
                       </td>
                       <td style={{ padding: "12px 16px", textAlign: "right", paddingRight: 20 }}>
@@ -513,6 +672,7 @@ export default function RolesDashboard() {
         permissions={permRole?.permissions ?? []}
         onSave={handlePermSave}
         roleName={permRole?.name ?? ""}
+        quota={permRole?.monthlyTokenQuota ?? DEFAULT_MONTHLY_TOKEN_QUOTA}
       />
 
       {/* ====== 删除确认弹窗 ====== */}

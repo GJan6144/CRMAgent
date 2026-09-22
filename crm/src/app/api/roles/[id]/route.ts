@@ -28,6 +28,20 @@ export async function PUT(
   const { id } = await params;
   try {
     const body = await request.json();
+
+    // 额度校验：只接受 ≥ 0 的整数（0 = 不限额）。非法值直接拒绝，
+    // 免得写进 roles.json 让 Agent 侧解析到脏数据。
+    if (body && body.monthlyTokenQuota !== undefined && body.monthlyTokenQuota !== null) {
+      const q = Number(body.monthlyTokenQuota);
+      if (!Number.isInteger(q) || q < 0) {
+        return NextResponse.json(
+          { error: "每月额度必须是 ≥ 0 的整数（0 表示不限额）" },
+          { status: 400 }
+        );
+      }
+      body.monthlyTokenQuota = q;
+    }
+
     const updated = updateRole(id, body);
     if (!updated) {
       return NextResponse.json({ error: "角色不存在" }, { status: 404 });

@@ -17,6 +17,10 @@ export interface AgentMessage {
   cards?: CardPayload[];
   /** 该条消息携带的任务清单（write_todos 快照），刷新后用于还原 */
   todos?: AgentTodo[];
+  /** 该条消息携带的图片附件元数据（不含 base64），刷新后用于还原 */
+  images?: ChatImage[];
+  /** 该条消息携带的文件附件元数据（不含正文），刷新后用于还原 */
+  files?: ChatFile[];
 }
 
 /* ============================ 对话流数据卡片 ============================ */
@@ -74,9 +78,49 @@ export interface ChatMessage {
    * 挂在消息上（而非全局），这样每轮回答各自保留自己的清单。
    */
   todos?: AgentTodo[];
+  /** 该消息附带的图片附件（仅元数据；原图按需经 `/api/agent/images/{id}` 取 data_url） */
+  images?: ChatImage[];
+  /** 该消息附带的文件附件（仅元数据；对话流以标签文字形式展示） */
+  files?: ChatFile[];
   pending?: boolean;
   error?: string;
   created_at?: string;
+}
+
+/* ============================ 图片附件 ============================ */
+
+/** 已上传的图片附件元数据（不含 base64，避免拖慢历史消息接口） */
+export interface ChatImage {
+  id: string;
+  session_id?: string;
+  filename: string;
+  mime: string;
+  size: number;
+  created_at?: string;
+}
+
+/** `GET /api/images/{id}` 的响应：带可直接塞进 <img src> 的 data_url */
+export interface ChatImageDetail extends ChatImage {
+  data_url: string;
+}
+
+/* ============================ 文件附件 ============================ */
+
+/** 已上传的文件附件元数据（不含正文，避免拖慢历史消息接口） */
+export interface ChatFile {
+  id: string;
+  session_id?: string;
+  filename: string;
+  mime: string;
+  size: number;
+  /** 正文字符数（供标签 tooltip 展示「内容多长」） */
+  chars?: number;
+  created_at?: string;
+}
+
+/** `GET /api/files/{id}` 的响应：带正文 */
+export interface ChatFileDetail extends ChatFile {
+  text: string;
 }
 
 /* ============================ 任务清单（write_todos） ============================ */
@@ -139,7 +183,7 @@ export type AgentEvent =
     }
   | { event: "loop"; node?: string; msg_count?: number; ts?: string }
   | { event: "approval_request"; requests?: ApprovalRequest[]; ts?: string }
-  | { event: "done"; message_id?: string; ts?: string }
+  | { event: "done"; message_id?: string; context?: ContextUsage; ts?: string }
   | { event: "error"; error?: string; ts?: string }
   | { event: string; [key: string]: unknown };
 
@@ -245,6 +289,63 @@ export interface PanelOverview {
   usage: { today: PanelUsage; total: PanelUsage };
   trend: PanelTrendPoint[];
   config: PanelSummary;
+}
+
+/* ==================== token 消耗统计（按用户） ==================== */
+
+/** 单个用户的 token 消耗 */
+export interface TokenUsageUser {
+  phone: string;
+  name: string;
+  role_name: string;
+  /** false = 无归属的历史数据（「未知用户」） */
+  known: boolean;
+  turns: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  llm_calls: number;
+  tool_calls: number;
+  last_ts: string | null;
+  /** 占总量百分比（0-100，两位小数） */
+  percent: number;
+  /* ---- 月度额度（每个用户各自）---- */
+  /** 本月已用 token */
+  month_used: number;
+  /** 该角色的月额度（0 = 不限额） */
+  quota: number;
+  /** month_used / quota（0-1+） */
+  quota_ratio: number;
+  /** 百分比（0-100+） */
+  quota_percent: number;
+  quota_unlimited: boolean;
+  quota_exceeded: boolean;
+}
+
+/** token 消耗统计响应（总量 + 按用户拆分） */
+export interface TokenUsageResponse {
+  scope: "all" | "today";
+  totals: {
+    turns: number;
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    llm_calls: number;
+    tool_calls: number;
+    /** 按字符数估算（供应商未回真实用量）的轮数 */
+    estimated_turns: number;
+    errors: number;
+  };
+  users: TokenUsageUser[];
+  /** 有归属的用户数（不含「未知用户」） */
+  user_count: number;
+  /** 自检：各用户合计应等于总量 */
+  self_check: {
+    users_sum: number;
+    grand_total: number;
+    delta: number;
+    consistent: boolean;
+  };
 }
 
 /* ============================ Skill 管理 ============================ */
@@ -380,4 +481,103 @@ export interface PanelMcpConfig {
   /** 完整定义 JSON 原文（name / label / description / config） */
   config: string;
   enabled: boolean;
+}
+
+/** 通信渠道（「渠道管理」Tab） */
+export interface PanelChannel {
+  name: string;
+  label: string;
+  description: string;
+  /** 开关：开启后 Agent 可用该渠道（工具 + 接收消息） */
+  enabled: boolean;
+  /** 是否已配置凭证（App ID / App Secret） */
+  configured: boolean;
+}
+
+export interface PanelChannelSummary {
+  total: number;
+  enabled: number;
+  disabled: number;
+}
+
+export interface PanelChannelsResponse {
+  channels: PanelChannel[];
+  summary: PanelChannelSummary;
+}
+
+/** 长期记忆条目（store 的 memories 命名空间） */
+export interface PanelMemoryEntry {
+  key: string;
+  value: string;
+}
+
+/** 记忆汇总（「记忆」Tab） */
+export interface PanelMemorySummary {
+  memories_count: number;
+}
+
+/** 记忆数据（「记忆」Tab） */
+export interface PanelMemoryResponse {
+  memories: PanelMemoryEntry[];
+  agents_md: string;
+  summary: PanelMemorySummary;
+  store_ready: boolean;
+}
+
+/** Agent 模型（「模型管理」Tab + 对话界面模型下拉框） */
+export interface PanelModel {
+  /** 模型 ID（唯一标识，创建后不可改） */
+  id: string;
+  /** 模型名称（传给供应商的实际 model 名） */
+  name: string;
+  /** API 地址（OpenAI 兼容 base_url） */
+  base_url: string;
+  /** 是否已配置 key（不回传明文） */
+  key_configured: boolean;
+  /** key 是否来自环境变量（未单独配置） */
+  key_from_env: boolean;
+  /** 是否支持图片识别（多模态） */
+  vision: boolean;
+  /** 上下文长度（token） */
+  context_length: number;
+  /** 开关：关闭后不可被对话选用 */
+  enabled: boolean;
+}
+
+export interface PanelModelSummary {
+  total: number;
+  enabled: number;
+  disabled: number;
+  /** 支持图片识别的模型数 */
+  vision: number;
+}
+
+export interface PanelModelsResponse {
+  models: PanelModel[];
+  summary: PanelModelSummary;
+  /** 当前选中（对话默认使用）的模型 id */
+  selected: string;
+}
+
+/** 对话界面下拉框数据源（仅启用中的模型） */
+export interface ActiveModelsResponse {
+  models: PanelModel[];
+  selected: string;
+}
+
+/** 上下文用量（对话页底部环形图标 + 弹窗） */
+export interface ContextUsage {
+  session_id: string;
+  /** 计算所用模型 id */
+  model: string;
+  /** 已用上下文（token） */
+  used_tokens: number;
+  /** 模型最大上下文（token） */
+  max_tokens: number;
+  /** 占比 0~1 */
+  ratio: number;
+  /** 占比百分数 0~100（已保留两位小数） */
+  percent: number;
+  /** 是否由字符数粗估而来（供应商未回传真实用量） */
+  estimated: boolean;
 }
