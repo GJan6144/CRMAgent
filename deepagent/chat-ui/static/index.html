@@ -275,7 +275,6 @@
         .suggestion-card:hover { border-color: var(--accent); background: var(--bg-ai-bubble); }
         .suggestion-title { font-weight: 600; margin-bottom: 4px; }
         .suggestion-desc { font-size: 13px; color: var(--text-secondary); }
-
         .input-area { padding: 16px 24px 20px; }
         .input-wrapper { max-width: 800px; margin: 0 auto; display: flex; flex-direction: column; gap: 4px; background: var(--bg-input); border-radius: 16px; padding: 12px 12px 8px 20px; border: 1px solid transparent; transition: border-color 0.2s; }
         .input-wrapper:focus-within { border-color: var(--accent); }
@@ -353,7 +352,7 @@
             .sidebar.collapsed { margin-left: -280px; }
             .menu-toggle { display: block; }
             .welcome-suggestions { grid-template-columns: 1fr; }
-            .bubble-wrap { max-width: 85%; }
+                        .bubble-wrap { max-width: 85%; }
             .thinking-block { padding-left: 24px; }
         }
     </style>
@@ -1240,6 +1239,7 @@
         }
 
         function useSuggestion(text) { const input = document.getElementById('chatInput'); input.value = text; input.focus(); autoResize(input); }
+
         function toggleSidebar() {
             document.getElementById('sidebar').classList.toggle('collapsed');
         }

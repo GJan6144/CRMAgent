@@ -19,6 +19,7 @@ from typing import AsyncGenerator
 # crm_tools 与本文件同级；显式加入 sys.path，兼容从任意 cwd 启动。
 # 必须在 FsApprovalMiddleware 定义之前导入（它要用到 CRM 工具名集合）。
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import crm_tools  # noqa: E402  （模块级引用：chat 端点要调 set_data_scope）
 from crm_tools import (  # noqa: E402
     READ_TOOLS as CRM_READ_TOOLS,
     WRITE_TOOLS as CRM_WRITE_TOOLS,
@@ -29,6 +30,9 @@ from crm_tools import (  # noqa: E402
     DENIED_TOOL_NAMES as CRM_DENIED_TOOL_NAMES,
     CRM_DATA_DIR as CRM_DATA_DIR,
 )
+
+# --- Agent 侧数据范围（从 CRM 的 roles.json 解析角色在「AI 助手」页的数据权限）---
+import crm_permissions  # noqa: E402
 
 # --- 对话流数据卡片工具（render_card：content 给模型 / artifact 给界面）---
 from card_tools import (  # noqa: E402
@@ -48,8 +52,22 @@ from docx_tools import (  # noqa: E402
     DOCX_TOOL_NAMES,
 )
 
+# --- 飞书渠道通信：发送 / 回复 / 搜通讯录 + 接收消息长连接 ---
+import feishu_tools  # noqa: E402
+
+# --- 通信渠道数据层（「渠道管理」Tab：开关 / 凭证）---
+import channel_config  # noqa: E402
+
 # --- MCP（外部工具服务器）桥接：加载 bing-cn-mcp 等外部工具 ---
 import mcp_tools as mcp_tools  # noqa: E402
+
+# --- Agent 定时任务（数据层；调度循环与执行在 server.py）---
+import scheduler  # noqa: E402
+
+# --- 模型注册表（「模型管理」Tab + 对话界面模型下拉框）---
+import model_config  # noqa: E402
+import image_store  # noqa: E402
+import file_store  # noqa: E402
 
 # --- 知识库文件上传（前端「Agent 知识库」页：列表 / 上传 / 删除 / 进度）---
 from kb_embeddings import describe as kb_embedding_describe  # noqa: E402
@@ -174,8 +192,11 @@ class FsApprovalMiddleware(AgentMiddleware):
         "delete": "禁止删除文件：当前不允许 Agent 执行删除操作。",
     }
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, auto_approve: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
+        # 无人值守场景（Agent 定时任务 / 测试执行）下自动批准审批档工具，
+        # 避免 interrupt 永久阻塞等待一个不存在的人工决策。
+        self.auto_approve = auto_approve
         self.refresh(agent_effective())
 
     def refresh(self, eff: dict) -> None:
@@ -325,6 +346,13 @@ class FsApprovalMiddleware(AgentMiddleware):
             last_ai_msg.tool_calls = revised
             return {"messages": [last_ai_msg, *artificial]}
 
+        if self.auto_approve:
+            # 无人值守（Agent 定时任务 / 测试执行）：自动批准，直接放行所有待审批工具
+            for tc, _ in pending:
+                revised.append(tc)
+            last_ai_msg.tool_calls = revised
+            return {"messages": [last_ai_msg, *artificial]}
+
         # 人工审批：构造 interrupt 载荷（前端渲染成审批卡片）
         action_requests = []
         review_configs = []
@@ -411,21 +439,33 @@ def _resolve_builtin_skills_dir() -> Path | None:
     return None
 
 
-MODEL_NAME = "deepseek-v4-flash"
+MODEL_NAME = "deepseek-flash"  # 兜底默认值（真实默认见 model_config.DEFAULT_SELECTED）
 
-# DeepSeek chat model instance that preserves reasoning_content (thinking)
-# so the UI can stream the chain-of-thought. Reuse one instance across agents.
-_deepseek_model = DeepSeekChatOpenAI(
-    model=MODEL_NAME,
-    base_url=os.environ.get("OPENAI_BASE_URL", "https://api.deepseek.com/v1"),
-    api_key=os.environ.get("OPENAI_API_KEY"),
-    temperature=0,
-    streaming=True,
-    use_responses_api=False,
-    # 让流式响应也返回 token 用量（OpenAI 兼容的 stream_options.include_usage），
-    # 「Agent 控制面板」的 Token 消耗量据此统计。
-    stream_usage=True,
-)
+# --- 模型注册表：把 DeepSeek 模型类注入 model_config，由它按 id 构造并缓存实例 ---
+model_config.set_model_class(DeepSeekChatOpenAI)
+
+
+def _resolve_model(model_id: str | None = None):
+    """取本轮对话要用的模型实例（``model_id`` 为空则用当前选中模型）。"""
+    try:
+        mid = model_id or model_config.get_selected()
+        return mid, model_config.get_chat_model(mid)
+    except Exception as e:  # noqa: BLE001
+        # 注册表异常时回落到种子默认模型，保证对话不中断
+        print(f"[model] 解析模型失败，回落 {MODEL_NAME}: {e}")
+        return MODEL_NAME, model_config.get_chat_model(MODEL_NAME)
+
+
+def _active_model_id() -> str:
+    """当前对话实际使用的模型 id（供概览 / 健康检查展示）。"""
+    try:
+        return model_config.get_selected()
+    except Exception:  # noqa: BLE001
+        return MODEL_NAME
+
+
+# 默认模型实例（保持向后兼容，供少量直接引用处使用）
+_deepseek_model = model_config.get_chat_model(model_config.get_selected())
 
 # Register DeepSeek provider profile
 register_provider_profile(
@@ -769,6 +809,14 @@ base_tools = [
     *DOCX_TOOLS,
 ]
 search_tool = [web_search]
+
+
+def feishu_active_tools() -> list:
+    """飞书渠道工具：渠道开启才返回（关闭则飞书工具对模型不可见）。
+
+    与「渠道管理」Tab 的开关联动；工具级开关仍由 TOOL_CATALOG 单独控制。
+    """
+    return feishu_tools.FEISHU_TOOLS if channel_config.is_enabled("feishu") else []
 
 # 「本地工具」按名索引：供「Agent 控制面板」按名过滤（开关）与判定权限
 LOCAL_TOOLS = base_tools + search_tool
@@ -1132,16 +1180,23 @@ def _effective_system_prompt(eff: dict) -> str:
     return base
 
 
-def build_agent(use_search: bool = False):
+def build_agent(use_search: bool = False, auto_approve: bool = False, model_id: str | None = None):
     """按「Agent 控制面板」的最新配置构建 Agent。
 
-    每次请求都重建，使面板改动（工具开关 / 权限档 / 系统提示词 / 技能开关）即时生效：
-      1. 工具清单：按「启用开关」过滤，被关闭的工具不再对模型可见；
-      2. 权限策略：刷新中间件的 禁止 / 关闭 / 审批 / 放行 集合；
-      3. 系统提示词：面板覆盖（若有）并追加「已关闭工具 / 已关闭技能」说明；
-      4. 技能：用 `SkillsControlMiddleware` 按开关过滤技能清单。
+    每次请求都重建，使面板改动（工具开关 / 权限档 / 系统提示词 / 技能开关 / 模型）即时生效：
+      1. 模型：按 ``model_id``（对话界面下拉框选择）取实例，为空则用当前选中模型；
+      2. 工具清单：按「启用开关」过滤，被关闭的工具不再对模型可见；
+      3. 权限策略：刷新中间件的 禁止 / 关闭 / 审批 / 放行 集合；
+      4. 系统提示词：面板覆盖（若有）并追加「已关闭工具 / 已关闭技能」说明；
+      5. 技能：用 `SkillsControlMiddleware` 按开关过滤技能清单。
+
+    ``auto_approve=True``（Agent 定时任务 / 测试执行）时用独立的审批中间件实例，
+    自动批准审批档工具，避免无人值守下 interrupt 阻塞。
     """
     eff = agent_effective()
+
+    # 0) 模型：解析本轮使用的实例（未知 / 已关闭的 id 会回落到当前选中模型）
+    resolved_model_id, chat_model = _resolve_model(model_id)
 
     # 1) 工具清单：按开关过滤本地工具
     tools = [
@@ -1159,8 +1214,21 @@ def build_agent(use_search: bool = False):
     if mcp_extra:
         tools = tools + mcp_extra
 
-    # 2) 刷新中间件运行时策略
-    fs_approval_middleware.refresh(eff)
+    # 飞书渠道工具：渠道开启 + 面板工具开启 才加入（渠道关闭则飞书工具对模型不可见）
+    feishu_extra = [
+        t for t in feishu_active_tools()
+        if eff["settings"].get(t.name, {}).get("enabled", True)
+    ]
+    if feishu_extra:
+        tools = tools + feishu_extra
+
+    # 2) 刷新中间件运行时策略（定时任务用独立实例，自动批准审批档工具）
+    if auto_approve:
+        approval_mw = FsApprovalMiddleware(auto_approve=True)
+        approval_mw.refresh(eff)
+    else:
+        approval_mw = fs_approval_middleware
+        approval_mw.refresh(eff)
 
     # 3) 技能：**不**走 `skills=` 参数（那会用框架原生的、无开关的 SkillsMiddleware），
     #    改成自己塞一个带开关的版本进中间件栈。标签按 `SKILL_SOURCES` 显式给出，
@@ -1172,7 +1240,7 @@ def build_agent(use_search: bool = False):
     )
 
     return create_deep_agent(
-        model=_deepseek_model,
+        model=chat_model,
         backend=backend,
         permissions=permissions,
         checkpointer=checkpointer,
@@ -1181,9 +1249,145 @@ def build_agent(use_search: bool = False):
         skills=None,
         memory=["/chat-ui/AGENTS.md"],
         tools=tools,
-        middleware=(fs_approval_middleware, skills_middleware),
+        middleware=(approval_mw, skills_middleware),
         system_prompt=_effective_system_prompt(eff),
     )
+
+# --- Agent 定时任务：执行 + 调度循环 ---
+def _extract_final_text(result: dict) -> str:
+    """从 ainvoke 结果里取最后一条 AI 消息正文。"""
+    msgs = result.get("messages", []) if isinstance(result, dict) else []
+    for m in reversed(msgs):
+        if isinstance(m, AIMessage) and getattr(m, "content", ""):
+            return str(m.content)
+    return "(无文本输出)"
+
+
+async def _invoke_prompt(prompt: str, thread_id: str | None = None) -> dict:
+    """用指定提示词开新会话执行一次 Agent，返回 {ok, text|error}。
+
+    默认每次调用使用全新 thread_id（新会话）；传入 ``thread_id`` 可复用会话
+    （如飞书渠道按 chat_id 映射，保持同一飞书会话的连续上下文）。
+    自动批准审批档工具，避免无人值守下 interrupt 卡死。
+    """
+    agent = build_agent(auto_approve=True)
+    if not thread_id:
+        thread_id = f"thread_adhoc_{uuid.uuid4().hex[:8]}"
+    try:
+        result = await agent.ainvoke(
+            {"messages": [HumanMessage(content=prompt)]},
+            config={"configurable": {"thread_id": thread_id}},
+        )
+        return {"ok": True, "text": _extract_final_text(result)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+def _is_once(task: dict) -> bool:
+    """once（一次后停用）仅对「定时执行」有意义；周期执行天然重复。"""
+    return task.get("trigger_type") == "daily" and task.get("frequency") == "once"
+
+
+def _task_next_run(task: dict) -> str:
+    return scheduler.compute_next_run(task["trigger_type"], task["hour"], task["minute"],
+                                      task["weekdays_only"])
+
+
+async def _execute_task(task_id: str) -> None:
+    """执行一次定时任务并回写结果（success / error + 推进 next_run）。"""
+    task = scheduler.get_task(task_id)
+    if not task:
+        return
+    is_once = _is_once(task)
+    res = await _invoke_prompt(task["prompt"])
+    nxt = None if is_once else _task_next_run(task)
+    scheduler.mark_run(task_id, "success" if res["ok"] else "error",
+                       res.get("text") or res.get("error", ""), nxt, disable=is_once)
+
+
+async def _scheduler_loop() -> None:
+    """后台调度循环：每 20 秒扫一次到期任务并异步执行。"""
+    while True:
+        try:
+            for task in scheduler.get_due_tasks():
+                is_once = _is_once(task)
+                # 占位：立即推进 next_run（once 任务则直接停用），防止执行期间被重复拾取
+                nxt = None if is_once else _task_next_run(task)
+                scheduler.mark_run(task["id"], "running", "", nxt, disable=is_once)
+                asyncio.create_task(_execute_task(task["id"]))
+        except Exception as e:  # noqa: BLE001
+            print(f"[scheduler] 调度循环异常: {e}")
+        await asyncio.sleep(20)
+
+
+# --- 飞书渠道：接收消息闭环（落库 → Agent 处理 → 回复发回飞书） ---
+FEISHU_INBOX_ID = "feishu_inbox"
+
+
+def _ensure_feishu_inbox() -> None:
+    """确保「飞书消息」聚合会话存在（前端会话列表可见）。"""
+    db = get_db()
+    row = db.execute("SELECT id FROM sessions WHERE id = ?", (FEISHU_INBOX_ID,)).fetchone()
+    if not row:
+        now = datetime.now().isoformat()
+        db.execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at, pinned) VALUES (?, ?, ?, ?, 0)",
+            (FEISHU_INBOX_ID, "飞书消息", now, now),
+        )
+        db.commit()
+    db.close()
+
+
+def _append_feishu_message(role: str, content: str) -> None:
+    """往「飞书消息」聚合会话追加一条消息。"""
+    db = get_db()
+    now = datetime.now().isoformat()
+    db.execute(
+        "INSERT INTO messages (id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
+        (str(uuid.uuid4()), FEISHU_INBOX_ID, role, content, now),
+    )
+    db.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now, FEISHU_INBOX_ID))
+    db.commit()
+    db.close()
+
+
+async def _handle_feishu_message(info: dict) -> None:
+    """处理一条飞书消息：落库 → Agent 处理 → 落库回复 → 发回飞书。"""
+    chat_id = info.get("chat_id", "")
+    text = (info.get("text") or "").strip()
+    if not text:
+        return
+    sender = info.get("sender_id") or info.get("sender_type") or "飞书"
+    _ensure_feishu_inbox()
+    _append_feishu_message("user", f"[飞书·{sender}] {text}")
+
+    # Agent 处理：同一飞书会话用稳定 thread_id 保持连续上下文
+    res = await _invoke_prompt(text, thread_id=f"feishu_{chat_id}" if chat_id else None)
+    reply = (res.get("text") or res.get("error") or "").strip()
+    if reply:
+        _append_feishu_message("assistant", reply)
+    if chat_id and reply:
+        try:
+            out = feishu_tools.feishu_send_message.func(chat_id, reply, "chat_id")
+            print(f"[feishu] 回复结果: {out}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[feishu] 回复异常: {e}")
+
+
+async def _feishu_worker() -> None:
+    """消费飞书消息队列，异步交给 Agent 处理。"""
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            info = await loop.run_in_executor(None, feishu_tools.message_queue.get)
+        except Exception:  # noqa: BLE001
+            await asyncio.sleep(1)
+            continue
+        try:
+            await _handle_feishu_message(info)
+        except Exception as e:  # noqa: BLE001
+            print(f"[feishu] 消息处理异常: {e}")
+
 
 # --- Database ---
 def init_db():
@@ -1202,6 +1406,17 @@ def init_db():
     cols = [row[1] for row in cursor.fetchall()]
     if 'pinned' not in cols:
         conn.execute("ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+    # Migration: 会话归属（谁创建的会话）。用于「按用户统计 token 消耗」。
+    # ⚠️ 与 agent 数据范围共用同一套身份字段（前端 useAuth 传过来的）。
+    # 历史会话没有归属 → 落到「未知用户」，不追溯。
+    for _col, _ddl in (
+        ("owner_phone", "TEXT NOT NULL DEFAULT ''"),
+        ("owner_name", "TEXT NOT NULL DEFAULT ''"),
+        ("owner_role_id", "TEXT NOT NULL DEFAULT ''"),
+        ("owner_role_name", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        if _col not in cols:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {_col} {_ddl}")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY,
@@ -1222,6 +1437,20 @@ def init_db():
     # 为空表示该轮没有清单；历史库自动补列，无需重建。
     if 'todos' not in msg_cols:
         conn.execute("ALTER TABLE messages ADD COLUMN todos TEXT NOT NULL DEFAULT ''")
+    # Migration: 用户消息携带的图片 id 列表（JSON 数组文本）。
+    # 图片实体存 chat_images 表，这里只存引用；为空表示该消息没有图片。
+    if 'image_ids' not in msg_cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN image_ids TEXT NOT NULL DEFAULT ''")
+    # Migration: 用户消息携带的**文件附件** id 列表（JSON 数组文本）。
+    # 文件实体存 chat_files 表，这里只存引用；为空表示该消息没有附件。
+    if 'file_ids' not in msg_cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN file_ids TEXT NOT NULL DEFAULT ''")
+    # Migration: 该条助手消息是否由 **vision 守卫** 生成（未真正调用模型）。
+    # ⚠️ 必须标记：守卫话术「当前模型不支持图片识别」若作为正常历史回复进入下一轮，
+    #    会让模型被自己带偏 —— 用户切到支持图片的模型再发图时，模型会顺着
+    #    历史里那句"我看不到图"继续拒答（详见 /api/chat 历史重建处的注释）。
+    if 'is_guard' not in msg_cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN is_guard INTEGER NOT NULL DEFAULT 0")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS feedback (
             id TEXT PRIMARY KEY,
@@ -1250,8 +1479,48 @@ def init_db():
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_metrics_ts ON agent_metrics(ts)")
+    # Migration: 指标行的**归属冗余**。刻意不从 sessions JOIN 取（那样会话删掉归属就丢了），
+    # 且按用户聚合不用 JOIN，SQL 更简单。⚠️ 与 sessions 的 owner_* 写入时同步。
+    cursor = conn.execute("PRAGMA table_info(agent_metrics)")
+    m_cols = [row[1] for row in cursor.fetchall()]
+    for _col, _ddl in (
+        ("owner_phone", "TEXT NOT NULL DEFAULT ''"),
+        ("owner_name", "TEXT NOT NULL DEFAULT ''"),
+        ("owner_role_id", "TEXT NOT NULL DEFAULT ''"),
+        ("owner_role_name", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        if _col not in m_cols:
+            conn.execute(f"ALTER TABLE agent_metrics ADD COLUMN {_col} {_ddl}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_metrics_owner ON agent_metrics(owner_phone)"
+    )
     conn.commit()
     conn.close()
+
+
+def _owner_field(owner: dict, *names: str) -> str:
+    """从一个归属 dict 里取字段，兼容 ``phone``/``user_phone`` 两种命名。
+
+    ⚠️ 项目里有两套命名：HTTP 请求体用 ``user_phone``（前端字段名），
+    内部 dict 用 ``phone``。曾因只认一种而**静默丢掉归属**（写入空串，统计全落
+    「未知用户」，且不报错）—— 所以这里两种都认，避免调用方踩坑。
+    """
+    for n in names:
+        v = owner.get(n)
+        if v:
+            return str(v)
+    return ""
+
+
+def _normalize_owner(owner: dict | None) -> dict:
+    """把任意来源的归属 dict 归一成 ``{phone, name, role_id, role_name}``。"""
+    owner = owner or {}
+    return {
+        "phone": _owner_field(owner, "phone", "user_phone"),
+        "name": _owner_field(owner, "name", "user_name"),
+        "role_id": _owner_field(owner, "role_id"),
+        "role_name": _owner_field(owner, "role_name"),
+    }
 
 
 def record_metric(
@@ -1260,15 +1529,22 @@ def record_metric(
     ok: bool,
     usage: dict | None = None,
     model: str = "",
+    owner: dict | None = None,
 ) -> None:
-    """写入一轮对话的指标（失败容忍：统计不应影响主流程）。"""
+    """写入一轮对话的指标（失败容忍：统计不应影响主流程）。
+
+    ``owner`` = ``{phone, name, role_id, role_name}``（也接受 ``user_phone``/``user_name``），
+    用于「按用户统计 token 消耗」。缺省/为空 → 归属列为空串，统计时归入「未知用户」。
+    """
     usage = usage or {}
+    own = _normalize_owner(owner)
     try:
         db = get_db()
         db.execute(
             "INSERT INTO agent_metrics (ts, session_id, model, latency_ms, ok, prompt_tokens,"
-            " completion_tokens, total_tokens, llm_calls, tool_calls, tokens_estimated, tools_json)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " completion_tokens, total_tokens, llm_calls, tool_calls, tokens_estimated, tools_json,"
+            " owner_phone, owner_name, owner_role_id, owner_role_name)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 datetime.now().isoformat(timespec="seconds"),
                 session_id,
@@ -1282,6 +1558,10 @@ def record_metric(
                 int(usage.get("tool_calls") or 0),
                 int(usage.get("tokens_estimated") or 0),
                 usage.get("tools_json") or "[]",
+                own["phone"],
+                own["name"],
+                own["role_id"],
+                own["role_name"],
             ),
         )
         db.commit()
@@ -1289,20 +1569,124 @@ def record_metric(
     except Exception as e:  # noqa: BLE001
         print(f"[metrics] 写入失败: {e}")
 
+
+def _backfill_session_owner(session_id: str, owner: dict) -> None:
+    """给「还没有归属」的会话补记归属（历史会话 / 匿名创建的会话）。
+
+    ⚠️ 只补空，**不覆盖**已有归属 —— 否则一个会话被别的账号打开就会改写历史消耗的归属。
+    失败容忍：统计不应影响主流程。
+    """
+    own = _normalize_owner(owner)
+    if not (own["phone"] or own["name"]):
+        return
+    try:
+        db = get_db()
+        db.execute(
+            "UPDATE sessions SET owner_phone = ?, owner_name = ?,"
+            " owner_role_id = ?, owner_role_name = ?"
+            " WHERE id = ? AND (owner_phone = '' OR owner_phone IS NULL)"
+            " AND (owner_name = '' OR owner_name IS NULL)",
+            (
+                own["phone"],
+                own["name"],
+                own["role_id"],
+                own["role_name"],
+                session_id,
+            ),
+        )
+        db.commit()
+        db.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"[metrics] 补记会话归属失败: {e}")
+
 def get_db():
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
+
+# --- 上下文用量（对话页底部的环形图标 + 弹窗） ---
+def _context_usage(session_id: str, model_id: str, usage: dict | None = None) -> dict:
+    """算出「当前会话已用上下文 / 模型最大上下文」。
+
+    取值优先级：
+      1. 本轮真实 ``prompt_tokens``（= 这轮请求送进模型的输入量，就是当前上下文占用）；
+      2. 回落到该会话在 ``agent_metrics`` 里最后一条非零 ``prompt_tokens``（刷新页面 / 切会话时用）；
+      3. 都没有则返回 ``used=0``。
+
+    供应商未回传用量时 ``prompt_tokens`` 会是 0，此时按字符数粗估（与面板口径一致）。
+    """
+    used = 0
+    estimated = False
+    usage = usage or {}
+    used = int(usage.get("prompt_tokens") or 0)
+    if used <= 0:
+        # 估算口径：本轮 total_tokens 里减去输出，剩余近似为输入
+        total = int(usage.get("total_tokens") or 0)
+        completion = int(usage.get("completion_tokens") or 0)
+        if total > completion:
+            used = total - completion
+            estimated = True
+    if used <= 0:
+        try:
+            db = get_db()
+            row = db.execute(
+                "SELECT prompt_tokens, tokens_estimated FROM agent_metrics"
+                " WHERE session_id = ? AND prompt_tokens > 0"
+                " ORDER BY id DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            db.close()
+            if row:
+                used = int(row["prompt_tokens"] or 0)
+                estimated = bool(row["tokens_estimated"])
+        except Exception as e:  # noqa: BLE001
+            print(f"[context] 读取历史用量失败: {e}")
+
+    meta = model_config.get_model(model_id) or {}
+    limit = int(meta.get("context_length") or 0)
+    # 兜底：模型未配置上下文长度时按 1M 处理，避免前端除零
+    if limit <= 0:
+        limit = 1024 * 1024
+    used = max(0, used)
+    ratio = min(1.0, used / limit) if limit else 0.0
+    return {
+        "session_id": session_id,
+        "model": model_id,
+        "used_tokens": used,
+        "max_tokens": limit,
+        "ratio": round(ratio, 6),
+        "percent": round(ratio * 100, 2),
+        "estimated": bool(estimated),
+    }
+
 # --- Pydantic Models ---
 class CreateSessionRequest(BaseModel):
     title: str = "New Chat"
+    # 会话归属（谁建的）。用于「按用户统计 token 消耗」；缺省 → 未知用户。
+    user_phone: str = ""
+    user_name: str = ""
+    role_id: str = ""
+    role_name: str = ""
 
 class SendMessageRequest(BaseModel):
     session_id: str
     content: str
     use_search: bool = False
+    # 对话界面底部下拉框选中的模型；为空则用注册表当前选中模型
+    model: str = ""
+    # 本消息附带的图片 id 列表（先经 POST /api/images 上传得到）
+    image_ids: list[str] = []
+    # 本消息附带的**文件附件** id 列表（先经 POST /api/files 上传得到）
+    file_ids: list[str] = []
+    # --- 调用方身份（由 CRM 前端带上，用于计算 Agent 的数据读写范围）---
+    # 前端只负责声明「我是谁」，具体权限一律由服务端读 roles.json 自行判定，
+    # 避免前端直接传 scope 被篡改。缺省时按「全部」处理（等价于老行为，向后兼容）。
+    user_phone: str = ""
+    user_name: str = ""
+    role_id: str = ""
+    role_name: str = ""
 
 class ApproveRequest(BaseModel):
     approved: bool
@@ -1322,10 +1706,37 @@ class FeedbackRequest(BaseModel):
 class KbDeleteRequest(BaseModel):
     doc_ids: list[str] = []
 
+class ScheduleCreateRequest(BaseModel):
+    name: str
+    prompt: str
+    trigger_type: str = "daily"  # daily（定时执行）/ interval（周期执行）
+    hour: int
+    minute: int
+    frequency: str = "repeat"  # 仅 daily 用：repeat（重复）/ once（一次）
+    weekdays_only: bool = False
+
+class ScheduleUpdateRequest(BaseModel):
+    name: str
+    prompt: str
+    trigger_type: str = "daily"
+    hour: int
+    minute: int
+    frequency: str = "repeat"
+    weekdays_only: bool = False
+
+class ScheduleEnabledRequest(BaseModel):
+    enabled: bool
+
+class RunPromptRequest(BaseModel):
+    prompt: str
+
 # --- App ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    image_store.init_table()
+    file_store.init_table()
+    scheduler.init_table()
     # 启动时预加载外部 MCP 工具（bing-cn-mcp 等）；失败自动降级，不阻塞服务
     await mcp_tools.load_mcp_tools()
     global checkpointer, store
@@ -1336,7 +1747,16 @@ async def lifespan(app: FastAPI):
     # Persistent async checkpointer (agent graph state survives restarts)
     async with AsyncSqliteSaver.from_conn_string(str(AGENT_STATE_DB)) as ckpt:
         checkpointer = ckpt
+        # 启动 Agent 定时任务调度循环（后台协程，随服务生命周期运行）
+        _sched_task = asyncio.create_task(_scheduler_loop())
+        # 启动飞书接收消息长连接（未配置凭证则跳过）+ 消息消费 worker
+        _feishu_task = None
+        if feishu_tools.start_receiver():
+            _feishu_task = asyncio.create_task(_feishu_worker())
         yield
+        _sched_task.cancel()
+        if _feishu_task:
+            _feishu_task.cancel()
     _conn.close()
 
 app = FastAPI(lifespan=lifespan)
@@ -1356,12 +1776,38 @@ def list_sessions():
 def create_session(req: CreateSessionRequest):
     session_id = str(uuid.uuid4())
     now = datetime.now().isoformat()
+    own = _normalize_owner({
+        "user_phone": req.user_phone, "user_name": req.user_name,
+        "role_id": req.role_id, "role_name": req.role_name,
+    })
     db = get_db()
-    db.execute("INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-               (session_id, req.title, now, now))
+    db.execute(
+        "INSERT INTO sessions (id, title, created_at, updated_at,"
+        " owner_phone, owner_name, owner_role_id, owner_role_name)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            session_id,
+            req.title,
+            now,
+            now,
+            own["phone"],
+            own["name"],
+            own["role_id"],
+            own["role_name"],
+        ),
+    )
     db.commit()
     db.close()
-    return {"id": session_id, "title": req.title, "created_at": now, "updated_at": now}
+    return {
+        "id": session_id,
+        "title": req.title,
+        "created_at": now,
+        "updated_at": now,
+        "owner_phone": own["phone"],
+        "owner_name": own["name"],
+        "owner_role_id": own["role_id"],
+        "owner_role_name": own["role_name"],
+    }
 
 @app.delete("/api/sessions/{session_id}")
 def delete_session(session_id: str):
@@ -1370,6 +1816,16 @@ def delete_session(session_id: str):
     db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
     db.commit()
     db.close()
+    # 图片是会话级资源，随会话一并清理（否则 base64 会一直占库）
+    try:
+        image_store.delete_images_for_session(session_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"[images] 清理会话图片失败: {e}")
+    # 文件附件同理（还会顺带删掉落盘的临时 txt）
+    try:
+        file_store.delete_files_for_session(session_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"[files] 清理会话附件失败: {e}")
     return {"ok": True}
 
 @app.patch("/api/sessions/{session_id}")
@@ -1420,9 +1876,145 @@ def get_messages(session_id: str):
             "created_at": m["created_at"],
             "cards": _json_list(m, "cards"),
             "todos": _json_list(m, "todos"),
+            # 图片只回元数据（不含 base64）；前端按需用 /api/images/{id} 取原图
+            "images": image_store.get_images(_json_list(m, "image_ids")),
+            # 文件附件只回元数据（不含正文）；对话流按标签展示即可
+            "files": file_store.get_files(_json_list(m, "file_ids")),
         }
         for m in messages
     ]
+
+
+@app.get("/api/sessions/{session_id}/context")
+def get_session_context(session_id: str, model: str = ""):
+    """当前会话的上下文用量（刷新页面 / 切换会话时恢复环形图标）。
+
+    可选 query ``model`` 指定所用模型；不传则取注册表的当前默认模型。
+    """
+    model_id = model or _active_model_id()
+    try:
+        if not model_config.is_enabled(model_id):
+            model_id = _active_model_id()
+    except Exception:  # noqa: BLE001
+        model_id = _active_model_id()
+    return _context_usage(session_id, model_id)
+
+
+# --- 图片附件 API ---
+#   POST /api/images             上传一张图（body = 原始字节，文件名 / 类型走 query）
+#   GET  /api/images/{id}        取图（返回 data URL，供「对话流单独一条图片消息」渲染）
+#   GET  /api/images/{id}/meta   只取元数据（不含 base64）
+#   DELETE /api/images/{id}      删除一张图（用户发送前反悔时清理）
+#
+# 与知识库上传同一取舍：走原始字节而非 multipart，省掉 python-multipart 依赖，
+# 也避免二进制在解析途中被按 UTF-8 解码弄坏。
+
+@app.post("/api/images")
+async def upload_image(request: Request, filename: str = "", session_id: str = ""):
+    """上传一张图片，返回 ``{id, filename, mime, size, data_url_only_hint}``。
+
+    图片本身不直接回传，前端只需 ``id`` 即可在发送时引用。
+    """
+    raw = await request.body()
+    mime = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if not image_store.is_allowed_mime(mime):
+        raise HTTPException(
+            status_code=415,
+            detail=f"不支持的图片类型：{mime or '未知'}。仅支持 PNG / JPEG / WebP / GIF。",
+        )
+    try:
+        meta = image_store.save_image(session_id or "", filename, mime, raw)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    return meta
+
+
+@app.get("/api/images/{image_id}")
+def get_image(image_id: str):
+    """取图，返回 ``data:<mime>;base64,...``（前端直接塞进 <img src>）。"""
+    img = image_store.get_image(image_id)
+    if not img:
+        raise HTTPException(status_code=404, detail="图片不存在")
+    return {
+        "id": img["id"],
+        "filename": img["filename"],
+        "mime": img["mime"],
+        "size": img["size"],
+        "data_url": f"data:{img['mime']};base64,{img['data_b64']}",
+    }
+
+
+@app.get("/api/images/{image_id}/meta")
+def get_image_meta(image_id: str):
+    img = image_store.get_image(image_id)
+    if not img:
+        raise HTTPException(status_code=404, detail="图片不存在")
+    img.pop("data_b64", None)
+    return img
+
+
+@app.delete("/api/images/{image_id}")
+def delete_image(image_id: str):
+    n = image_store.delete_images([image_id])
+    if not n:
+        raise HTTPException(status_code=404, detail="图片不存在")
+    return {"ok": True, "deleted": n}
+
+
+# --- 文件附件 API（当前仅 txt）---
+#   POST   /api/files            上传一个文本文件（body = 原始字节，文件名 / 类型走 query）
+#   GET    /api/files/{id}       取元数据 + 正文（供前端预览 / 排查）
+#   GET    /api/files/{id}/meta  只取元数据（不含正文，供对话流渲染标签）
+#   DELETE /api/files/{id}       删除（用户发送前反悔时清理）
+#
+# 与图片同样的取舍：走原始字节而非 multipart，省掉 python-multipart 依赖。
+
+@app.post("/api/files")
+async def upload_file(request: Request, filename: str = "", session_id: str = ""):
+    """上传一个文本文件，返回 ``{id, filename, mime, size, chars}``。
+
+    ⚠️ 校验**按扩展名**而非 MIME：浏览器给 .txt 的 MIME 可能是
+    ``text/plain`` / ``application/octet-stream`` 甚至空串，不可靠。
+    """
+    raw = await request.body()
+    mime = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if not file_store.is_allowed_filename(filename):
+        raise HTTPException(
+            status_code=415,
+            detail=f"不支持的文件类型：{Path(filename or '').suffix or '未知'}。仅支持 .txt。",
+        )
+    try:
+        meta = file_store.save_file(session_id or "", filename, mime, raw)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    return meta
+
+
+@app.get("/api/files/{file_id}")
+def get_file(file_id: str):
+    """取文件（含正文）。"""
+    f = file_store.get_file(file_id)
+    if not f:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return f
+
+
+@app.get("/api/files/{file_id}/meta")
+def get_file_meta(file_id: str):
+    """只取元数据（不含正文，避免长文本在列表接口里反复传输）。"""
+    f = file_store.get_file(file_id)
+    if not f:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    f.pop("text", None)
+    return f
+
+
+@app.delete("/api/files/{file_id}")
+def delete_file(file_id: str):
+    n = file_store.delete_files([file_id])
+    if not n:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return {"ok": True, "deleted": n}
 
 # --- Feedback API ---
 @app.post("/api/feedback")
@@ -1564,6 +2156,49 @@ class McpAddRequest(BaseModel):
     config: str
 
 
+class ChannelEnabledRequest(BaseModel):
+    enabled: bool
+
+
+class ChannelCredentialsRequest(BaseModel):
+    app_id: str
+    app_secret: str
+
+
+# --- 「模型管理」Tab + 对话界面模型下拉框 ---
+
+class ModelEnabledRequest(BaseModel):
+    enabled: bool
+
+
+class ModelSelectRequest(BaseModel):
+    model: str
+
+
+class ModelUpsertRequest(BaseModel):
+    """新增 / 更新一条模型配置。
+
+    ``id`` 只在新增时必填；更新用路径里的 id。``api_key`` 传空串表示保持原 key。
+    """
+    id: str = ""
+    name: str
+    base_url: str
+    api_key: str = ""
+    vision: bool = False
+    context_length: int = 1024 * 1024
+
+
+class MemoryUpsertRequest(BaseModel):
+    """新增 / 更新一条长期记忆（key 已存在则覆盖 value）。"""
+    key: str
+    value: str
+
+
+class AgentsMdRequest(BaseModel):
+    """保存项目记忆文件 AGENTS.md 的完整内容。"""
+    content: str
+
+
 def _metric_summary(scope: str = "all") -> dict:
     """聚合指标：scope="today" 只统计当天；否则统计全部。"""
     where = "WHERE date(ts) = date('now','localtime')" if scope == "today" else ""
@@ -1647,7 +2282,7 @@ def panel_overview():
         "service": {
             "name": "deepagents-chat-ui",
             "status": "healthy" if healthy else "degraded",
-            "model": MODEL_NAME,
+            "model": _active_model_id(),
             "backend": "LocalShellBackend(FilesystemBackend)",
             "port": 8765,
             "pid": os.getpid(),
@@ -1657,17 +2292,274 @@ def panel_overview():
         },
         "health": {**checks, "status": "healthy" if healthy else "degraded"},
         "model": {
-            "name": MODEL_NAME,
-            "base_url": os.environ.get("OPENAI_BASE_URL", ""),
+            "name": _active_model_id(),
+            "base_url": model_config.get_base_url(_active_model_id()),
             # 未探测过时为 null，由前端调用 /api/panel/model-check 填充
             "connected": (cached or {}).get("ok"),
             "checked_at": (cached or {}).get("tested_at"),
             "latency_ms": (cached or {}).get("latency_ms"),
+            "summary": model_config.get_summary(),
         },
         "usage": {"today": _metric_summary("today"), "total": _metric_summary("all")},
         "trend": _metric_trend(7),
         "config": agent_config_summary(),
     }
+
+
+# ============================ token 消耗统计 ============================
+# 口径说明（务必与前端展示一致）
+#   - 「总量」= agent_metrics 全表 SUM，含无归属的历史行。
+#   - 「按用户」= 按 (owner_phone, owner_name) 分组；无归属的历史行归入「未知用户」。
+#   - ⚠️ 两者必须相等：用户明细的 total 合计 === 总量。响应里带 self_check 供前端/测试断言，
+#     一旦不等说明聚合口径分叉了，要立刻查（不要静默容忍）。
+UNKNOWN_OWNER_LABEL = "未知用户"
+
+
+def _token_usage(scope: str = "all") -> dict:
+    """统计 token 消耗：总量 + 按用户拆分。
+
+    ``scope``: ``"today"`` 只算当天（本地时区），``"all"`` 全部。
+    """
+    where = "WHERE date(ts) = date('now','localtime')" if scope == "today" else ""
+
+    db = get_db()
+    # 总量
+    total = db.execute(
+        f"""SELECT COUNT(*) AS turns,
+                   COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                   COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                   COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                   COALESCE(SUM(llm_calls), 0) AS llm_calls,
+                   COALESCE(SUM(tool_calls), 0) AS tool_calls,
+                   COALESCE(SUM(tokens_estimated), 0) AS estimated_turns,
+                   COALESCE(SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0) AS errors
+            FROM agent_metrics {where}"""
+    ).fetchone()
+
+    # 按用户聚合。⚠️ 归属为空的归入「未知用户」，**不能过滤掉** —— 否则合计会小于总量。
+    rows = db.execute(
+        f"""SELECT owner_phone, owner_name, owner_role_name,
+                   COUNT(*) AS turns,
+                   COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                   COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                   COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                   COALESCE(SUM(llm_calls), 0) AS llm_calls,
+                   COALESCE(SUM(tool_calls), 0) AS tool_calls,
+                   MAX(ts) AS last_ts
+            FROM agent_metrics {where}
+            GROUP BY owner_phone, owner_name
+            ORDER BY total_tokens DESC"""
+    ).fetchall()
+    db.close()
+
+    grand_total = int(total["total_tokens"] or 0)
+    users: list[dict] = []
+    # 角色额度表（按 role_name 索引），用于给每个用户标注「本月额度 / 已用」。
+    # ⚠️ 「累计」口径下展示的是**本月**额度进度（额度本身就是月度的），
+    #    因此这里按「本月已用」单独取数，不与 scope 的累计值混用。
+    quota_by_role: dict[str, int] = {}
+    for _r in crm_permissions.list_roles():
+        quota_by_role[str(_r.get("name", ""))] = crm_permissions.role_monthly_quota(_r)
+
+    for r in rows:
+        phone = str(r["owner_phone"] or "")
+        name = str(r["owner_name"] or "")
+        role_name = str(r["owner_role_name"] or "")
+        known = bool(phone or name)
+        tok = int(r["total_tokens"] or 0)
+        # 本月用量（额度判定口径），仅对已知用户有意义
+        month_used = monthly_used_tokens(phone, name) if known else 0
+        role_quota = quota_by_role.get(role_name, crm_permissions.DEFAULT_MONTHLY_TOKEN_QUOTA)
+        unlimited = role_quota <= 0
+        q_ratio = (month_used / role_quota) if role_quota > 0 else 0.0
+        users.append({
+            "phone": phone,
+            "name": name if known else UNKNOWN_OWNER_LABEL,
+            "role_name": role_name,
+            "known": known,
+            "turns": int(r["turns"] or 0),
+            "prompt_tokens": int(r["prompt_tokens"] or 0),
+            "completion_tokens": int(r["completion_tokens"] or 0),
+            "total_tokens": tok,
+            "llm_calls": int(r["llm_calls"] or 0),
+            "tool_calls": int(r["tool_calls"] or 0),
+            "last_ts": r["last_ts"],
+            # 占比按总量算，前端直接用来画占比条
+            "percent": round(tok / grand_total * 100, 2) if grand_total else 0.0,
+            # ---- 月度额度（每人各自）----
+            "month_used": month_used,
+            "quota": role_quota,
+            "quota_ratio": round(q_ratio, 4),
+            "quota_percent": round(q_ratio * 100, 2),
+            "quota_unlimited": unlimited,
+            "quota_exceeded": (not unlimited) and month_used >= role_quota,
+        })
+
+    # 排序：已知用户按消耗降序在前，「未知用户」固定沉底（它是历史残留，不该抢视线）
+    users.sort(key=lambda u: (not u["known"], -u["total_tokens"]))
+
+    users_sum = sum(u["total_tokens"] for u in users)
+    return {
+        "scope": scope,
+        "totals": {
+            "turns": int(total["turns"] or 0),
+            "prompt_tokens": int(total["prompt_tokens"] or 0),
+            "completion_tokens": int(total["completion_tokens"] or 0),
+            "total_tokens": grand_total,
+            "llm_calls": int(total["llm_calls"] or 0),
+            "tool_calls": int(total["tool_calls"] or 0),
+            "estimated_turns": int(total["estimated_turns"] or 0),
+            "errors": int(total["errors"] or 0),
+        },
+        "users": users,
+        "user_count": len([u for u in users if u["known"]]),
+        # 自检：用户合计 vs 总量。正常必须 delta=0
+        "self_check": {
+            "users_sum": users_sum,
+            "grand_total": grand_total,
+            "delta": users_sum - grand_total,
+            "consistent": users_sum == grand_total,
+        },
+    }
+
+
+# --------------------------------------------------------------------------
+# 月度额度（按用户角色限制每月 token 使用量）
+# --------------------------------------------------------------------------
+#   语义：角色上的 monthlyTokenQuota 是**该角色下每个用户各自**的月额度。
+#   用量口径：agent_metrics 里 owner_phone 命中且落在**本自然月**（北京时间）的 total_tokens 之和。
+#   ⚠️ 月份边界必须用北京时间：本机是 UTC，直接用 date('now') 会跨月差 8 小时。
+MONTH_TZ_OFFSET = "+8 hours"
+
+
+def _current_month_start() -> str:
+    """本自然月的起点（北京时间，`YYYY-MM-01`）。"""
+    # 以 SQLite 的 localtime 为基准不可靠（本机 UTC），显式加 8 小时换算北京时间。
+    db = get_db()
+    row = db.execute(
+        "SELECT strftime('%Y-%m-01', datetime('now', ?)) AS m", (MONTH_TZ_OFFSET,)
+    ).fetchone()
+    db.close()
+    return str(row["m"])
+
+
+def monthly_used_tokens(phone: str, name: str = "") -> int:
+    """某用户**本月**消耗的 token 合计（北京自然月）。
+
+    归属匹配：``owner_phone`` 优先；电话为空时用 ``owner_name`` 兜底
+    （历史行/未带电话的场景）。
+    """
+    p = str(phone or "").strip()
+    n = str(name or "").strip()
+    if not p and not n:
+        return 0
+    month_start = _current_month_start()
+    db = get_db()
+    if p:
+        row = db.execute(
+            "SELECT COALESCE(SUM(total_tokens), 0) AS t FROM agent_metrics"
+            " WHERE owner_phone = ? AND substr(datetime(ts, ?), 1, 10) >= ?",
+            (p, MONTH_TZ_OFFSET, month_start),
+        ).fetchone()
+    else:
+        row = db.execute(
+            "SELECT COALESCE(SUM(total_tokens), 0) AS t FROM agent_metrics"
+            " WHERE owner_phone = '' AND owner_name = ? AND substr(datetime(ts, ?), 1, 10) >= ?",
+            (n, MONTH_TZ_OFFSET, month_start),
+        ).fetchone()
+    db.close()
+    return int(row["t"] or 0)
+
+
+def resolve_quota(scope_info: dict) -> dict:
+    """把「角色额度」与「本月已用」合成一个可判定/可展示的结构。
+
+    返回：
+        {
+          "quota": int,        # 月额度（0 = 不限额）
+          "used": int,         # 本月已用
+          "remaining": int,    # 剩余（不限额时为 -1，语义为「无限」）
+          "ratio": float,      # used / quota（0-1+），不限额时 0
+          "percent": float,    # 百分比
+          "unlimited": bool,
+          "exceeded": bool,    # 是否已超限（不限额永远 False）
+          "role_name": str,
+        }
+    """
+    quota = int(scope_info.get("monthly_token_quota") or 0)
+    phone = scope_info.get("user_phone") or ""
+    name = scope_info.get("user_name") or ""
+    used = monthly_used_tokens(phone, name)
+    unlimited = quota <= 0
+    ratio = (used / quota) if quota > 0 else 0.0
+    return {
+        "quota": quota,
+        "used": used,
+        "remaining": -1 if unlimited else max(0, quota - used),
+        "ratio": round(ratio, 4),
+        "percent": round(ratio * 100, 2),
+        "unlimited": unlimited,
+        "exceeded": (not unlimited) and used >= quota,
+        "role_name": scope_info.get("role_name") or "",
+    }
+
+
+QUOTA_EXCEEDED_TEXT = "当前额度已用完，联系管理员申请额度"
+
+
+async def _quota_refuse_stream(session_id: str, text: str, model_id: str) -> AsyncGenerator[str, None]:
+    """额度守卫：落库两轮消息（用户 + 助手话术），本轮流式返回固定文案，**不调模型**。
+
+    ⚠️ 与 vision 守卫同范式：整轮打 ``is_guard=1``，避免这条「被拒绝」的话术
+       进后续历史把模型带偏（详见 is_guard 注释）。
+    """
+    now_str = datetime.now().isoformat()
+    db = get_db()
+    try:
+        user_msg_id = str(uuid.uuid4())
+        ai_msg_id = str(uuid.uuid4())
+        db.execute(
+            "INSERT INTO messages"
+            " (id, session_id, role, content, created_at, is_guard)"
+            " VALUES (?, ?, ?, ?, ?, 1)",
+            (user_msg_id, session_id, "user", "", now_str),
+        )
+        db.execute(
+            "INSERT INTO messages (id, session_id, role, content, created_at, is_guard)"
+            " VALUES (?, ?, ?, ?, ?, 1)",
+            (ai_msg_id, session_id, "assistant", text, now_str),
+        )
+        db.execute(
+            "UPDATE sessions SET updated_at = ? WHERE id = ?", (now_str, session_id)
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    def _emit(payload: dict) -> str:
+        payload["ts"] = datetime.now().isoformat()
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    yield _emit({"event": "llm_token", "token": text})
+    yield _emit(
+        {
+            "event": "done",
+            "done": True,
+            "message_id": ai_msg_id,
+            "context": _context_usage(session_id, model_id),
+        }
+    )
+
+
+@app.get("/api/panel/token-usage")
+def panel_token_usage(scope: str = "all"):
+    """token 消耗统计：总量 + 按用户拆分。
+
+    ``scope``: ``all``（默认，累计） / ``today``（今日）。
+    """
+    if scope not in ("all", "today"):
+        raise HTTPException(status_code=422, detail="scope 只能是 all 或 today")
+    return _token_usage(scope)
 
 
 @app.post("/api/panel/model-check")
@@ -1682,7 +2574,7 @@ async def panel_model_check(force: bool = False):
     ok, reply, err = True, "", ""
     try:
         resp = await asyncio.wait_for(
-            _deepseek_model.ainvoke([HumanMessage(content="ping")]), timeout=25
+            _resolve_model(None)[1].ainvoke([HumanMessage(content="ping")]), timeout=25
         )
         content = getattr(resp, "content", "")
         reply = content if isinstance(content, str) else str(content)
@@ -1690,7 +2582,7 @@ async def panel_model_check(force: bool = False):
         ok, err = False, str(e)
     result = {
         "ok": ok,
-        "model": MODEL_NAME,
+        "model": _active_model_id(),
         "latency_ms": round((time.perf_counter() - started) * 1000, 1),
         "tested_at": datetime.now().isoformat(timespec="seconds"),
         "reply_preview": reply[:60],
@@ -1998,6 +2890,283 @@ async def panel_reset_mcps():
     return _panel_mcps_payload()
 
 
+# --------------------------------------------------------------------------
+# 渠道管理（面板「渠道管理」Tab）
+# --------------------------------------------------------------------------
+def _panel_channels_payload() -> dict:
+    channels = channel_config.get_channels()
+    total = len(channels)
+    enabled = sum(1 for c in channels if c["enabled"])
+    return {
+        "channels": channels,
+        "summary": {"total": total, "enabled": enabled, "disabled": total - enabled},
+    }
+
+
+@app.get("/api/panel/channels")
+def panel_list_channels():
+    return _panel_channels_payload()
+
+
+@app.put("/api/panel/channels/{name}/enabled")
+def panel_set_channel_enabled(name: str, req: ChannelEnabledRequest):
+    try:
+        channel = channel_config.set_enabled(name, req.enabled)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"ok": True, "channel": channel, "summary": _panel_channels_payload()["summary"]}
+
+
+@app.put("/api/panel/channels/{name}/credentials")
+def panel_set_channel_credentials(name: str, req: ChannelCredentialsRequest):
+    try:
+        channel = channel_config.set_credentials(name, req.app_id, req.app_secret)
+    except ValueError as e:
+        status = 404 if "未知渠道" in str(e) else 422
+        raise HTTPException(status_code=status, detail=str(e))
+    return {"ok": True, "channel": channel}
+
+
+# --------------------------------------------------------------------------
+# 模型管理（面板「模型管理」Tab + 对话界面模型下拉框）
+# --------------------------------------------------------------------------
+#   注册表 = model_config.py（持久化 model_config.json，种子 3 个 DeepSeek 模型）。
+#   GET    /api/panel/models              列出全部可用模型 + 汇总 + 当前选中
+#   POST   /api/panel/models              新增模型（body 含 id）
+#   PUT    /api/panel/models/{id}         更新模型配置（api_key 空串=保持原值）
+#   PUT    /api/panel/models/{id}/enabled 开启 / 关闭
+#   DELETE /api/panel/models/{id}         删除
+#   PUT    /api/panel/models/selected     切换当前对话使用的模型
+#   GET    /api/models                    对话界面下拉框数据源（仅启用中的模型）
+# --------------------------------------------------------------------------
+def _panel_models_payload() -> dict:
+    return {
+        "models": model_config.get_models(),
+        "summary": model_config.get_summary(),
+        "selected": model_config.get_selected(),
+    }
+
+
+@app.get("/api/panel/models")
+def panel_list_models():
+    return _panel_models_payload()
+
+
+@app.get("/api/models")
+def list_active_models():
+    """对话界面底部下拉框：只返回启用中的模型，避免选中被关闭的模型。"""
+    models = [m for m in model_config.get_models() if m["enabled"]]
+    return {"models": models, "selected": model_config.get_selected()}
+
+
+@app.get("/api/agent-scope")
+def get_agent_scope(
+    phone: str = "",
+    name: str = "",
+    role_id: str = "",
+    role_name: str = "",
+):
+    """查询某身份在 Agent（AI 助手）侧的 CRM 数据范围。
+
+    只为展示 / 自检用 —— 真正的范围判定始终发生在 /api/chat 里（服务端自行读
+    roles.json），本端点不接受调用方直接指定 scope，所以不构成越权入口。
+    """
+    info = crm_permissions.resolve_agent_scope(
+        phone=phone, name=name, role_id=role_id, role_name=role_name
+    )
+    return {
+        **info,
+        "description": crm_permissions.describe(info),
+        # 前端可直接展示「Agent 可读哪些实体、哪些被过滤」
+        "owner_scoped_entities": [
+            k for k, v in crm_tools.ENTITIES.items() if v.get("owner_field")
+        ],
+        "public_entities": [
+            k for k, v in crm_tools.ENTITIES.items() if not v.get("owner_field")
+        ],
+    }
+
+
+@app.get("/api/agent-quota")
+def get_agent_quota(
+    phone: str = "",
+    name: str = "",
+    role_id: str = "",
+    role_name: str = "",
+):
+    """查询某身份的**本月 token 额度**使用情况（每人各自的口径）。
+
+    与 `/api/agent-scope` 同性质：只读展示，真正的拦截发生在 /api/chat 内部
+    （服务端自行读 roles.json 与 agent_metrics），本端点不接受调用方指定额度。
+    """
+    info = crm_permissions.resolve_agent_scope(
+        phone=phone, name=name, role_id=role_id, role_name=role_name
+    )
+    quota = resolve_quota(info)
+    return {
+        "month": _current_month_start()[:7],   # YYYY-MM
+        "user_name": info.get("user_name") or "",
+        "user_phone": info.get("user_phone") or "",
+        "role_id": info.get("role_id") or "",
+        "role_name": info.get("role_name") or "",
+        **quota,
+        "exceeded_text": QUOTA_EXCEEDED_TEXT,
+    }
+
+
+
+@app.post("/api/panel/models")
+def panel_add_model(req: ModelUpsertRequest):
+    try:
+        model = model_config.upsert_model(
+            model_id=req.id,
+            name=req.name,
+            base_url=req.base_url,
+            api_key=req.api_key,
+            vision=req.vision,
+            context_length=req.context_length,
+            create=True,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"ok": True, "model": model, "summary": model_config.get_summary()}
+
+
+@app.put("/api/panel/models/selected")
+def panel_select_model(req: ModelSelectRequest):
+    try:
+        selected = model_config.set_selected(req.model)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"ok": True, "selected": selected}
+
+
+@app.put("/api/panel/models/{model_id}")
+def panel_update_model(model_id: str, req: ModelUpsertRequest):
+    try:
+        model = model_config.upsert_model(
+            model_id=model_id,
+            name=req.name,
+            base_url=req.base_url,
+            api_key=req.api_key,
+            vision=req.vision,
+            context_length=req.context_length,
+            create=False,
+        )
+    except ValueError as e:
+        status = 404 if "不存在" in str(e) else 422
+        raise HTTPException(status_code=status, detail=str(e))
+    return {"ok": True, "model": model, "summary": model_config.get_summary()}
+
+
+@app.put("/api/panel/models/{model_id}/enabled")
+def panel_set_model_enabled(model_id: str, req: ModelEnabledRequest):
+    try:
+        model = model_config.set_enabled(model_id, req.enabled)
+    except ValueError as e:
+        status = 404 if "不存在" in str(e) else 422
+        raise HTTPException(status_code=status, detail=str(e))
+    return {
+        "ok": True,
+        "model": model,
+        "summary": model_config.get_summary(),
+        "selected": model_config.get_selected(),
+    }
+
+
+@app.delete("/api/panel/models/{model_id}")
+def panel_delete_model(model_id: str):
+    try:
+        model_config.delete_model(model_id)
+    except ValueError as e:
+        status = 404 if "不存在" in str(e) else 422
+        raise HTTPException(status_code=status, detail=str(e))
+    return {"ok": True, "summary": model_config.get_summary(), "selected": model_config.get_selected()}
+
+
+# --------------------------------------------------------------------------
+# 记忆（面板「记忆」Tab）
+# --------------------------------------------------------------------------
+#   长期记忆 = store 的 ("memories",) 命名空间（store_memory / recall_memory 工具读写）；
+#   项目记忆文件 = /chat-ui/AGENTS.md（MemoryMiddleware 加载注入系统提示词）。
+#   GET  /api/panel/memory             列出长期记忆条目 + AGENTS.md 内容
+#   POST /api/panel/memory             新增/更新一条长期记忆（{key, value}）
+#   DELETE /api/panel/memory/{key}     删除一条长期记忆
+#   PUT  /api/panel/memory/agents-md   保存 AGENTS.md 内容
+# --------------------------------------------------------------------------
+
+AGENTS_MD_PATH = CHAT_UI_DIR / "AGENTS.md"
+
+
+def _read_agents_md() -> str:
+    if AGENTS_MD_PATH.exists():
+        try:
+            return AGENTS_MD_PATH.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+    return ""
+
+
+def _panel_memory_payload() -> dict:
+    global store
+    if store is None:
+        return {"memories": [], "agents_md": _read_agents_md(),
+                "summary": {"memories_count": 0}, "store_ready": False}
+    items = store.search(("memories",), limit=500)
+    memories = [{"key": it.key, "value": (it.value or {}).get("value", "")} for it in items]
+    return {
+        "memories": memories,
+        "agents_md": _read_agents_md(),
+        "summary": {"memories_count": len(memories)},
+        "store_ready": True,
+    }
+
+
+@app.get("/api/panel/memory")
+def panel_get_memory():
+    return _panel_memory_payload()
+
+
+@app.post("/api/panel/memory")
+def panel_upsert_memory(req: MemoryUpsertRequest):
+    global store
+    if store is None:
+        raise HTTPException(status_code=503, detail="记忆库未初始化（store 未就绪）")
+    key = req.key.strip()
+    value = req.value.strip()
+    if not key:
+        raise HTTPException(status_code=422, detail="记忆的 key 不能为空")
+    if not value:
+        raise HTTPException(status_code=422, detail="记忆内容不能为空")
+    try:
+        store.put(("memories",), key, {"value": value})
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"保存记忆失败: {e}")
+    return {"ok": True, "memory": {"key": key, "value": value},
+            "summary": _panel_memory_payload()["summary"]}
+
+
+@app.delete("/api/panel/memory/{key}")
+def panel_delete_memory(key: str):
+    global store
+    if store is None:
+        raise HTTPException(status_code=503, detail="记忆库未初始化（store 未就绪）")
+    try:
+        store.delete(("memories",), key)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"删除记忆失败: {e}")
+    return {"ok": True, "summary": _panel_memory_payload()["summary"]}
+
+
+@app.put("/api/panel/memory/agents-md")
+def panel_put_agents_md(req: AgentsMdRequest):
+    try:
+        AGENTS_MD_PATH.write_text(req.content, encoding="utf-8")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"保存 AGENTS.md 失败: {e}")
+    return {"ok": True, "agents_md": req.content}
+
+
 @app.get("/api/context/{session_id}")
 def get_context(session_id: str):
     """Return the current session context: system prompt, conversation history,
@@ -2034,7 +3203,7 @@ def get_context(session_id: str):
         }
 
     tool_defs = [
-        _tool_meta(t) for t in (base_tools + search_tool + mcp_tools.get_mcp_tools())
+        _tool_meta(t) for t in (base_tools + search_tool + mcp_tools.get_mcp_tools() + feishu_active_tools())
         if eff["settings"].get(getattr(t, "name", ""), {}).get("enabled", True)
     ]
     # Built-in filesystem/shell tools provided by the backend (informational)
@@ -2103,36 +3272,245 @@ async def chat(req: SendMessageRequest):
         db.close()
         raise HTTPException(status_code=404, detail="Session not found")
 
+    # 本轮所选模型（图片能力判断与后续 build_agent 共用）
+    resolved_model_id, _ = _resolve_model(req.model or None)
+
+    # 图片附件：去重 + 条数上限，并校验确实存在
+    image_ids: list[str] = []
+    seen_ids: set[str] = set()
+    for iid in (req.image_ids or []):
+        if not isinstance(iid, str) or not iid or iid in seen_ids:
+            continue
+        seen_ids.add(iid)
+        image_ids.append(iid)
+    if image_ids:
+        found = image_store.get_images(image_ids)
+        # ⚠️ 不能静默丢弃无效 id：否则「图片丢失」会退化成普通文本消息偷偷发给模型
+        missing = [i for i in image_ids if i not in {m["id"] for m in found}]
+        if missing:
+            db.close()
+            raise HTTPException(
+                status_code=422,
+                detail=f"图片不存在或已过期：{', '.join(missing[:3])}",
+            )
+        image_ids = [m["id"] for m in found]
+    if len(image_ids) > image_store.MAX_IMAGES_PER_MESSAGE:
+        db.close()
+        raise HTTPException(
+            status_code=422,
+            detail=f"单条消息最多附带 {image_store.MAX_IMAGES_PER_MESSAGE} 张图片",
+        )
+
+    # 文件附件：去重 + 条数上限，并校验确实存在（与图片同一套口径）
+    file_ids: list[str] = []
+    seen_file_ids: set[str] = set()
+    for fid in (req.file_ids or []):
+        if not isinstance(fid, str) or not fid or fid in seen_file_ids:
+            continue
+        seen_file_ids.add(fid)
+        file_ids.append(fid)
+    if file_ids:
+        found_files = file_store.get_files(file_ids)
+        # ⚠️ 同图片：不能静默丢弃无效 id，否则「附件丢失」会退化成普通文本消息偷发给模型
+        missing_files = [i for i in file_ids if i not in {m["id"] for m in found_files}]
+        if missing_files:
+            db.close()
+            raise HTTPException(
+                status_code=422,
+                detail=f"附件不存在或已过期：{', '.join(missing_files[:3])}",
+            )
+        file_ids = [m["id"] for m in found_files]
+    if len(file_ids) > file_store.MAX_FILES_PER_MESSAGE:
+        db.close()
+        raise HTTPException(
+            status_code=422,
+            detail=f"单条消息最多附带 {file_store.MAX_FILES_PER_MESSAGE} 个文件",
+        )
+
+    # 模型不支持图片识别 → 落库消息 + 直接回固定话术，**不调用模型**
+    vision_ok = bool((model_config.get_model(resolved_model_id) or {}).get("vision"))
+    if image_ids and not vision_ok:
+        now_str = datetime.now().isoformat()
+        user_msg_id = str(uuid.uuid4())
+        ai_msg_id = str(uuid.uuid4())
+        warn_text = "当前模型不支持图片识别"
+        # ⚠️ 用户消息与助手话术**都**打 is_guard：这一整轮都不该进后续历史。
+        #    只跳助手那句会留下「带图用户消息 + 无回复」的孤儿轮，模型依然困惑。
+        db.execute(
+            "INSERT INTO messages"
+            " (id, session_id, role, content, created_at, image_ids, file_ids, is_guard)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+            (
+                user_msg_id,
+                req.session_id,
+                "user",
+                req.content,
+                now_str,
+                json.dumps(image_ids, ensure_ascii=False),
+                json.dumps(file_ids, ensure_ascii=False) if file_ids else "",
+            ),
+        )
+        db.execute(
+            "INSERT INTO messages (id, session_id, role, content, created_at, is_guard)"
+            " VALUES (?, ?, ?, ?, ?, 1)",
+            (ai_msg_id, req.session_id, "assistant", warn_text, now_str),
+        )
+        msg_count = db.execute(
+            "SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?", (req.session_id,)
+        ).fetchone()["cnt"]
+        if msg_count <= 2:
+            title = (req.content or "[图片]")[:30]
+            db.execute(
+                "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
+                (title, now_str, req.session_id),
+            )
+        db.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now_str, req.session_id))
+        db.commit()
+        db.close()
+
+        async def _refuse_stream() -> AsyncGenerator[str, None]:
+            def _emit_local(payload):
+                payload["ts"] = datetime.now().isoformat()
+                return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+            yield _emit_local({"event": "llm_token", "token": warn_text})
+            yield _emit_local(
+                {
+                    "event": "done",
+                    "done": True,
+                    "message_id": ai_msg_id,
+                    "context": _context_usage(req.session_id, resolved_model_id),
+                }
+            )
+
+        return StreamingResponse(_refuse_stream(), media_type="text/event-stream")
+
     # Save user message
+    # ⚠️ ``content`` 只存**用户原始输入**（附件正文不入库正文列）：
+    #    ① 前端展示保持干净，只显示用户打的字 + 附件标签；
+    #    ② 附件正文在下方「重建历史」时按 file_ids 重新拼，规则单一、不会两处漂移。
     msg_id = str(uuid.uuid4())
     now = datetime.now().isoformat()
-    db.execute("INSERT INTO messages (id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-               (msg_id, req.session_id, "user", req.content, now))
+    db.execute(
+        "INSERT INTO messages (id, session_id, role, content, created_at, image_ids, file_ids)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            msg_id,
+            req.session_id,
+            "user",
+            req.content,
+            now,
+            json.dumps(image_ids, ensure_ascii=False) if image_ids else "",
+            json.dumps(file_ids, ensure_ascii=False) if file_ids else "",
+        ),
+    )
 
     # Auto-title for first message
     msg_count = db.execute("SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?", (req.session_id,)).fetchone()["cnt"]
     if msg_count == 1:
-        title = req.content[:30] + ("..." if len(req.content) > 30 else "")
+        title_seed = req.content.strip() or "文件附件"
+        title = title_seed[:30] + ("..." if len(title_seed) > 30 else "")
         db.execute("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?", (title, now, req.session_id))
 
     db.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now, req.session_id))
     db.commit()
 
-    # Build message history
+    # Build message history（含图片：用户消息按多模态 content blocks 还原；
+    #                        含文件附件：短文本内联、长文本落盘给路径）
+    #
+    # ⚠️⚠️ **vision 守卫轮不重建**（``is_guard=1`` 的助手消息直接跳过）：
+    #     守卫话术「当前模型不支持图片识别」是**我们替模型写的**，不是模型自己的输出。
+    #     若把它当正常历史喂回去，模型会被自己"带偏" —— 典型场景：
+    #       用户先用纯文本模型(pro)发图 → 拿到守卫话术(落库) → 切到支持图片的 flash 再发图
+    #       → 历史里那句"我看不到图"让 flash 也坚持拒答（实测思考过程里明确写
+    #         "prior turn I said 当前模型不支持图片识别... I should be consistent"）。
+    #     跳过它之后，flash 只看得到用户的图片消息，行为才正确。
     history = db.execute(
-        "SELECT role, content FROM messages WHERE session_id = ? ORDER BY created_at ASC", (req.session_id,)
+        "SELECT role, content, image_ids, file_ids, is_guard FROM messages"
+        " WHERE session_id = ? ORDER BY created_at ASC",
+        (req.session_id,),
     ).fetchall()
     db.close()
 
     messages = []
     for h in history:
+        # 守卫轮（用户 + 助手两条都带 is_guard）：整轮不进历史，见上方说明
+        if h["is_guard"]:
+            continue
         if h["role"] == "user":
-            messages.append(HumanMessage(content=h["content"]))
+            try:
+                ids = json.loads(h["image_ids"] or "[]")
+            except Exception:  # noqa: BLE001
+                ids = []
+            try:
+                fids = json.loads(h["file_ids"] or "[]")
+            except Exception:  # noqa: BLE001
+                fids = []
+
+            # 附件正文：按 id 现取现拼（短内联 / 长落盘），每轮重建保证与当前阈值一致
+            text_content = h["content"] or ""
+            if isinstance(fids, list) and fids:
+                hist_files = [file_store.get_file(i) for i in fids]
+                hist_files = [f for f in hist_files if f]
+                if hist_files:
+                    block = file_store.build_prompt_text(hist_files)
+                    text_content = (
+                        f"{text_content}\n\n{block}" if text_content.strip() else block
+                    )
+
+            if isinstance(ids, list) and ids:
+                blocks: list[dict] = []
+                if text_content.strip():
+                    blocks.append({"type": "text", "text": text_content})
+                else:
+                    # 纯图片消息：补一句占位文本，避免部分供应商拒绝无文本的多模态输入
+                    blocks.append({"type": "text", "text": "请描述这张图片。"})
+                for iid in ids:
+                    url = image_store.data_url(iid)
+                    if url:
+                        blocks.append({"type": "image_url", "image_url": {"url": url}})
+                messages.append(HumanMessage(content=blocks))
+            else:
+                messages.append(HumanMessage(content=text_content))
         else:
             messages.append(AIMessage(content=h["content"]))
 
     # Invoke the full-featured agent
-    agent = build_agent(use_search=req.use_search)
+    # 每次请求重算数据范围：角色在「AI 助手」页的 dataScope 决定 CRM 工具能读写的范围。
+    # ⚠️ 必须用 ContextVar 逐请求设置（工具是模块级单例，同一批对象被所有请求复用）。
+    scope_info = crm_permissions.resolve_agent_scope(
+        phone=req.user_phone,
+        name=req.user_name,
+        role_id=req.role_id,
+        role_name=req.role_name,
+    )
+    crm_tools.set_data_scope(
+        scope=scope_info["scope"],
+        user_name=scope_info["user_name"],
+        user_phone=scope_info["user_phone"],
+    )
+    # token 消耗的归属（用于「按用户统计」）。⚠️ 用**已解析**的身份：
+    # 角色查得到就用角色里的规范姓名，查不到也保留前端传来的原值（不丢归属）。
+    owner = _normalize_owner({
+        "phone": scope_info["user_phone"] or req.user_phone,
+        "name": scope_info["user_name"] or req.user_name,
+        "role_id": scope_info["role_id"] or req.role_id,
+        "role_name": scope_info["role_name"] or req.role_name,
+    })
+    # 会话若当初没记归属（历史会话 / 匿名创建），本轮补记一次，让统计更完整
+    _backfill_session_owner(req.session_id, owner)
+
+    # ---- 月度额度守卫 ----
+    # 角色的 monthlyTokenQuota = **该角色下每个用户各自**的月额度（0 = 不限额）。
+    # 超限 → 落两条 is_guard 消息 + 回固定话术，**不调模型、不产生 token 消耗**。
+    quota = resolve_quota(scope_info)
+    if quota["exceeded"]:
+        return StreamingResponse(
+            _quota_refuse_stream(req.session_id, QUOTA_EXCEEDED_TEXT, resolved_model_id),
+            media_type="text/event-stream",
+        )
+
+    agent = build_agent(use_search=req.use_search, model_id=req.model or None)
 
     thread_id = f"thread_{req.session_id}"
     # 本轮对话的指标采集器（token / 工具调用次数等）
@@ -2334,14 +3712,23 @@ async def chat(req: SendMessageRequest):
             db.close()
 
             # 记录本轮指标（供「Agent 控制面板」统计）
+            turn_usage = metrics.finalize()
             record_metric(
                 req.session_id,
                 latency_ms=(time.perf_counter() - turn_started) * 1000,
                 ok=True,
-                usage=metrics.finalize(),
+                usage=turn_usage,
+                model=resolved_model_id,
+                owner=owner,
             )
 
-            yield _emit({"event": "done", "done": True, "message_id": ai_msg_id})
+            # 把「上下文用量」一并推给前端（对话页底部环形图标 + 弹窗）
+            yield _emit({
+                "event": "done",
+                "done": True,
+                "message_id": ai_msg_id,
+                "context": _context_usage(req.session_id, resolved_model_id, turn_usage),
+            })
 
         except Exception as e:
             import traceback
@@ -2352,6 +3739,8 @@ async def chat(req: SendMessageRequest):
                 latency_ms=(time.perf_counter() - turn_started) * 1000,
                 ok=False,
                 usage=metrics.finalize(),
+                model=resolved_model_id,
+                owner=owner,
             )
             yield _emit({"event": "error", "error": str(e)})
 
@@ -2547,6 +3936,127 @@ def delete_generated_file(path: str = ""):
     name = fp.name
     fp.unlink()
     return {"ok": True, "removed": name}
+
+
+# --------------------------------------------------------------------------
+# Agent 定时任务（创建 / 编辑 / 启停 / 测试 / 删除）
+# --------------------------------------------------------------------------
+def _validate_schedule(name, prompt, trigger_type, hour, minute, frequency, weekdays_only) -> None:
+    if not name or not str(name).strip():
+        raise HTTPException(status_code=422, detail="任务名不能为空")
+    if not prompt or not str(prompt).strip():
+        raise HTTPException(status_code=422, detail="任务执行提示词不能为空")
+    if trigger_type not in scheduler.TRIGGER_TYPES:
+        raise HTTPException(status_code=422, detail="触发规则不合法：仅支持 daily（定时执行）/ interval（周期执行）")
+    if trigger_type == "daily":
+        if not isinstance(hour, int) or not isinstance(minute, int) \
+                or not (0 <= hour <= 23) or not (0 <= minute <= 59):
+            raise HTTPException(status_code=422, detail="触发时间不合法：小时 0-23，分钟 0-59")
+        if frequency not in scheduler.FREQUENCIES:
+            raise HTTPException(status_code=422, detail="执行频率不合法：仅支持 repeat（重复）/ once（一次）")
+    else:  # interval
+        if not isinstance(hour, int) or not isinstance(minute, int) \
+                or not (0 <= hour <= 24) or not (1 <= minute <= 59):
+            raise HTTPException(status_code=422, detail="间隔时间不合法：小时 0-24，分钟 1-59")
+
+
+@app.get("/api/schedules")
+def list_schedules():
+    data = scheduler.list_tasks()
+    return {"data": data, "total": len(data)}
+
+
+@app.post("/api/schedules")
+def create_schedule(req: ScheduleCreateRequest):
+    _validate_schedule(req.name, req.prompt, req.trigger_type, req.hour, req.minute,
+                       req.frequency, req.weekdays_only)
+    task = scheduler.create_task(req.name.strip(), req.prompt.strip(), req.trigger_type,
+                                 req.hour, req.minute, req.frequency, req.weekdays_only)
+    return {"ok": True, "task": task}
+
+
+@app.put("/api/schedules/{task_id}")
+def update_schedule(task_id: str, req: ScheduleUpdateRequest):
+    _validate_schedule(req.name, req.prompt, req.trigger_type, req.hour, req.minute,
+                       req.frequency, req.weekdays_only)
+    task = scheduler.update_task(task_id, req.name.strip(), req.prompt.strip(), req.trigger_type,
+                                 req.hour, req.minute, req.frequency, req.weekdays_only)
+    if not task:
+        raise HTTPException(status_code=404, detail="定时任务不存在")
+    return {"ok": True, "task": task}
+
+
+@app.delete("/api/schedules/{task_id}")
+def delete_schedule(task_id: str):
+    if not scheduler.delete_task(task_id):
+        raise HTTPException(status_code=404, detail="定时任务不存在")
+    return {"ok": True}
+
+
+@app.put("/api/schedules/{task_id}/enabled")
+def set_schedule_enabled(task_id: str, req: ScheduleEnabledRequest):
+    task = scheduler.set_enabled(task_id, req.enabled)
+    if not task:
+        raise HTTPException(status_code=404, detail="定时任务不存在")
+    return {"ok": True, "task": task}
+
+
+@app.post("/api/schedules/{task_id}/test")
+async def test_schedule(task_id: str):
+    """立即执行一次已保存任务（开新会话），并回写上次执行结果。"""
+    task = scheduler.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="定时任务不存在")
+    res = await _invoke_prompt(task["prompt"])
+    scheduler.mark_run(task_id, "success" if res["ok"] else "error",
+                       res.get("text") or res.get("error", ""),
+                       task.get("next_run_at"), disable=False)
+    return res
+
+
+@app.post("/api/schedules/run")
+async def run_prompt_once(req: RunPromptRequest):
+    """用任意提示词立即执行一次 Agent（创建弹窗测试用），不落库。"""
+    if not req.prompt or not req.prompt.strip():
+        raise HTTPException(status_code=422, detail="提示词不能为空")
+    return await _invoke_prompt(req.prompt.strip())
+
+
+# --------------------------------------------------------------------------
+# 飞书渠道：OAuth 授权（搜通讯录需用户身份 token）
+# --------------------------------------------------------------------------
+@app.get("/api/feishu/authorize-url")
+def feishu_authorize_url():
+    """生成飞书 OAuth 授权地址（获取 user_access_token，用于搜通讯录）。"""
+    if not feishu_tools.configured():
+        raise HTTPException(status_code=400, detail="飞书未配置：请在 .env 设置 FEISHU_APP_ID / FEISHU_APP_SECRET")
+    return {"ok": True, "url": feishu_tools.get_authorize_url()}
+
+
+@app.get("/api/feishu/oauth/callback")
+def feishu_oauth_callback(code: str = "", state: str = ""):
+    """飞书 OAuth 授权回调：用 code 换 user_access_token 并落盘。"""
+    if not code:
+        return Response(content="<h3>授权失败：缺少 code</h3>", media_type="text/html")
+    result = feishu_tools.exchange_code(code)
+    status = "成功" if result["ok"] else "失败"
+    return Response(
+        content=f"<html><body style='font-family:sans-serif;padding:40px'>"
+                f"<h3>飞书授权{status}</h3><p>{result['msg']}</p></body></html>",
+        media_type="text/html",
+    )
+
+
+@app.get("/api/feishu/status")
+def feishu_status():
+    """飞书渠道状态：是否配置、是否已授权、授权地址。"""
+    configured = feishu_tools.configured()
+    authorized = bool(feishu_tools._get_valid_user_token())
+    return {
+        "configured": configured,
+        "authorized": authorized,
+        "authorize_url": feishu_tools.get_authorize_url() if configured else "",
+    }
 
 
 # --- Static Files ---

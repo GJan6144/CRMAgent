@@ -268,6 +268,9 @@ chat-ui/kb/
 # 「Skill 管理」改 SKILL.md 前的历史副本（本地便利功能，不进版本库）
 chat-ui/_skill_backups/
 
+# 文件附件里「长文本」的落盘目录（运行时生成，内容属于用户数据，不进版本库）
+chat-ui/uploads/
+
 # SQLite WAL / SHM 附属文件（跟着 .db 一起长大，从不需要进版本库）
 *.db-wal
 *.db-shm
@@ -285,3 +288,6 @@ chat-ui/static/contracts/
 chat-ui/_report_screenshots/
 chat-ui/_*_screenshots/
 chat-ui/mcp_config.json
+chat-ui/feishu_user_token.json
+chat-ui/channel_config.json
+chat-ui/model_config.json

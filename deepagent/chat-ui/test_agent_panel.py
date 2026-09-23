@@ -122,7 +122,19 @@ check("A0.3 overview 含今日/累计用量",
       "today" in ov.get("usage", {}) and "total" in ov.get("usage", {}), str(list(ov.get("usage", {}))))
 for key in ("calls", "avg_latency_ms", "tool_calls", "total_tokens"):
     check(f"A0.4 usage.today 含 {key}", key in ov["usage"]["today"], str(ov["usage"]["today"]))
-check("A0.5 overview 含模型信息", ov.get("model", {}).get("name") == "deepseek-v4-flash", str(ov.get("model")))
+# 当前生效模型由「模型管理」注册表决定（默认 deepseek-flash），不再硬编码单个名字
+_active_model = ov.get("model", {})
+_active_models = api("GET", "/api/models").json()
+_enabled_ids = [m.get("id") for m in _active_models.get("models", [])]
+check("A0.5 overview 含模型信息",
+      bool(_active_model.get("name")) and bool(_active_model.get("base_url")),
+      str(_active_model))
+check("A0.5.1 生效模型在已开启模型列表内",
+      _active_model.get("name") in _enabled_ids,
+      f"active={_active_model.get('name')} enabled={_enabled_ids}")
+check("A0.5.2 overview.model 含注册表汇总",
+      isinstance(_active_model.get("summary", {}).get("total"), int),
+      str(_active_model.get("summary")))
 
 # ---- A1 模型连通性 ----
 mc = api("POST", "/api/panel/model-check", timeout=60).json()

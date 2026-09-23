@@ -11,9 +11,9 @@ for /f "tokens=5" %%a in ('netstat -ano ^| find ":%CRM_PORT%" ^| find "LISTENING
     taskkill /F /PID %%a >nul 2>&1
 )
 
-:: 定位 npm：优先 PATH，其次 Node.js 默认安装目录
-set "NPM=npm"
-where npm >nul 2>&1 || set "NPM=%ProgramFiles%\nodejs\npm.cmd"
+:: 定位 node：优先 PATH，其次 Node.js 默认安装目录
+set "NODE=node"
+where node >nul 2>&1 || set "NODE=%ProgramFiles%\nodejs\node.exe"
 
 echo ====================================
 echo   CRM Agent Frontend
@@ -25,10 +25,19 @@ echo.
 
 cd /d "%CRM_DIR%"
 
+:: 首次运行：仅当 node_modules 缺失时才安装依赖
 if not exist "node_modules" (
-    echo [!] 首次运行，正在安装依赖...
-    call "%NPM%" install
+    echo [!] 未找到 node_modules，正在安装依赖...
+    call npm install
+    if errorlevel 1 (
+        echo [x] 依赖安装失败：请检查 Node.js / npm 环境
+        pause
+        exit /b 1
+    )
 )
 
-call "%NPM%" run dev
+:: 直接调用项目内的 next 入口，不经过 npm run
+:: 避免 PATH 中损坏或错位的 npm shim 影响启动
+"%NODE%" "%CRM_DIR%node_modules\next\dist\bin\next" dev -p %CRM_PORT%
+
 pause

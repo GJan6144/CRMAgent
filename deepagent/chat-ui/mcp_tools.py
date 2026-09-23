@@ -41,6 +41,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import shutil
@@ -49,6 +50,9 @@ from pathlib import Path
 
 _CHAT_UI_DIR = Path(__file__).resolve().parent
 _MCP_CONFIG_PATH = _CHAT_UI_DIR / "mcp_config.json"
+
+# 单个 MCP server 的工具发现（握手）超时秒数。超时即降级，绝不阻塞服务启动。
+_DISCOVER_TIMEOUT = 20.0
 
 # node.exe 候选路径（优先 WorkBuddy managed，其次系统 Node）
 _NODE_CANDIDATES = [
@@ -546,15 +550,25 @@ def reset_mcp() -> None:
 # --------------------------------------------------------------------------
 
 async def _discover(name: str, cfg: dict) -> None:
-    """发现某个 MCP server 的工具（一次握手后即关闭，无常驻子进程）。"""
+    """发现某个 MCP server 的工具（一次握手后即关闭，无常驻子进程）。
+
+    ⚠️ 必须带超时：MCP 子进程若因残留占用 / 启动异常而握手无响应，
+    `client.get_tools()` 会**永久挂住**，进而卡死 lifespan 启动（服务永不监听）。
+    """
     try:
         from langchain_mcp_adapters.client import MultiServerMCPClient
 
         client = MultiServerMCPClient({name: cfg})
-        tools = await client.get_tools(server_name=name)
+        tools = await asyncio.wait_for(
+            client.get_tools(server_name=name), timeout=_DISCOVER_TIMEOUT
+        )
         _mcp_tools_by_server[name] = tools
         _load_errors[name] = None
         print(f"[mcp] 已发现 {name}：{len(tools)} 个工具 {[t.name for t in tools]}")
+    except asyncio.TimeoutError:
+        _mcp_tools_by_server[name] = []
+        _load_errors[name] = f"TimeoutError: 握手超时（>{_DISCOVER_TIMEOUT}s）"
+        print(f"[mcp] 发现 {name} 失败（已降级）: {_load_errors[name]}")
     except Exception as e:  # noqa: BLE001 —— 单个 server 失败不能拖垮其它 server
         _mcp_tools_by_server[name] = []
         _load_errors[name] = f"{type(e).__name__}: {e}"
