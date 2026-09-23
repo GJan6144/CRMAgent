@@ -3209,6 +3209,333 @@ export default function AgentPanelDashboard() {
             </div>
           </>
         )}
+        {/* ==================== 用量统计（token 消耗） ==================== */}
+        {tab === "usage" && (
+          <div style={{ marginTop: 4 }}>
+            {/* 口径切换 + 说明 */}
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+              <div style={{ display: "inline-flex", border: `1px solid ${BORDER}`, borderRadius: 9, overflow: "hidden" }}>
+                {(["all", "today"] as const).map((sc) => (
+                  <button
+                    key={sc}
+                    data-testid={`usage-scope-${sc}`}
+                    onClick={() => {
+                      setUsageScope(sc);
+                      loadTokenUsage(sc);
+                    }}
+                    style={{
+                      padding: "7px 16px",
+                      fontSize: 12.5,
+                      fontWeight: usageScope === sc ? 600 : 400,
+                      fontFamily: "inherit",
+                      border: "none",
+                      cursor: "pointer",
+                      background: usageScope === sc ? PRIMARY : "#fff",
+                      color: usageScope === sc ? "#fff" : MUTED,
+                    }}
+                  >
+                    {sc === "all" ? "累计" : "今日"}
+                  </button>
+                ))}
+              </div>
+              <button
+                data-testid="usage-refresh"
+                onClick={() => loadTokenUsage(usageScope)}
+                disabled={usageLoading}
+                style={{
+                  padding: "7px 14px",
+                  borderRadius: 8,
+                  fontSize: 12.5,
+                  fontWeight: 600,
+                  fontFamily: "inherit",
+                  border: `1px solid ${BORDER}`,
+                  background: "#fff",
+                  color: TEXT,
+                  cursor: usageLoading ? "not-allowed" : "pointer",
+                  opacity: usageLoading ? 0.6 : 1,
+                }}
+              >
+                {usageLoading ? "刷新中…" : "刷新"}
+              </button>
+              <span style={{ fontSize: 11.5, color: SUBTLE, lineHeight: 1.6 }}>
+                {usageData?.viewer.restricted
+                  ? "口径：只统计归属本人的记录（真实用量优先，供应商未回时按字符数估算）。"
+                  : "口径：agent_metrics 全表求和（真实用量优先，供应商未回时按字符数估算）。"}
+              </span>
+            </div>
+
+            {!usageData ? (
+              <div style={{ ...CARD, padding: 40, textAlign: "center", color: MUTED, fontSize: 13 }}>
+                {usageLoading ? "加载中…" : "暂无数据"}
+              </div>
+            ) : (
+              <>
+                {/* 总量卡 */}
+                <div
+                  data-testid="usage-totals"
+                  style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 16 }}
+                >
+                  {[
+                    { k: "总 token", v: usageData.totals.total_tokens, c: PRIMARY },
+                    { k: "输入 token", v: usageData.totals.prompt_tokens, c: "#0F6E56" },
+                    { k: "输出 token", v: usageData.totals.completion_tokens, c: "#BA7517" },
+                    { k: "对话轮数", v: usageData.totals.turns, c: "#534AB7" },
+                  ].map((it) => (
+                    <div key={it.k} style={{ ...CARD, padding: "16px 18px" }}>
+                      <div style={{ fontSize: 11.5, color: MUTED, marginBottom: 6 }}>{it.k}</div>
+                      <div
+                        data-testid={`usage-total-${it.k}`}
+                        style={{ fontSize: 22, fontWeight: 600, color: it.c, fontVariantNumeric: "tabular-nums" }}
+                      >
+                        {it.v.toLocaleString()}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* 按用户明细 */}
+                <div style={{ ...CARD, padding: 0, overflow: "hidden" }}>
+                  <div
+                    style={{
+                      padding: "13px 18px",
+                      borderBottom: `1px solid ${BORDER}`,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 12,
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <div data-testid="usage-users-head" style={{ fontSize: 13.5, fontWeight: 600, color: TEXT }}>
+                      {usageData.viewer.restricted ? "我的用量" : "按用户统计"}
+                      <span style={{ fontSize: 11.5, fontWeight: 400, color: MUTED, marginLeft: 8 }}>
+                        {usageData.viewer.restricted
+                          ? "仅显示本人（管理员可查看全部用户）"
+                          : `共 ${usageData.user_count} 个用户`}
+                      </span>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <div
+                        data-testid="usage-scope-hint"
+                        style={{
+                          fontSize: 11.5,
+                          padding: "4px 10px",
+                          borderRadius: 6,
+                          fontWeight: 600,
+                          background: usageData.viewer.restricted ? "#EFF6FF" : "#F1F5F9",
+                          color: usageData.viewer.restricted ? "#1D4ED8" : MUTED,
+                        }}
+                      >
+                        {usageData.viewer.restricted ? "范围：仅本人" : "范围：全部用户"}
+                      </div>
+                      <div
+                        data-testid="usage-selfcheck"
+                        style={{
+                          fontSize: 11.5,
+                          padding: "4px 10px",
+                          borderRadius: 6,
+                          fontWeight: 600,
+                          background: usageData.self_check.consistent ? "#EAF3DE" : "#FCEBEB",
+                          color: usageData.self_check.consistent ? "#3B6D11" : "#A32D2D",
+                        }}
+                      >
+                        {usageData.self_check.consistent
+                          ? `合计一致 · ${usageData.self_check.users_sum.toLocaleString()} = 总量`
+                          : `⚠️ 合计 ${usageData.self_check.users_sum.toLocaleString()} ≠ 总量 ${usageData.self_check.grand_total.toLocaleString()}`}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+                      <thead>
+                        <tr style={{ background: "#F8FAFC", color: MUTED }}>
+                          {["用户", "角色", "总 token", "占比", "本月额度", "输入", "输出", "轮数", "工具调用", "最近使用"].map((h) => (
+                            <th
+                              key={h}
+                              style={{
+                                textAlign: h === "用户" || h === "角色" || h === "最近使用" ? "left" : "right",
+                                padding: "9px 14px",
+                                fontWeight: 600,
+                                fontSize: 11.5,
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {usageData.users.length === 0 ? (
+                          <tr>
+                            <td colSpan={10} style={{ padding: 28, textAlign: "center", color: SUBTLE }}>
+                              暂无消耗记录
+                            </td>
+                          </tr>
+                        ) : (
+                          usageData.users.map((u, i) => (
+                            <tr
+                              key={`${u.phone}-${u.name}-${i}`}
+                              data-testid={`usage-row-${i}`}
+                              style={{ borderTop: `1px solid ${BORDER}` }}
+                            >
+                              <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>
+                                <span style={{ fontWeight: 500, color: u.known ? TEXT : SUBTLE }}>{u.name}</span>
+                                {u.phone ? (
+                                  <span style={{ color: SUBTLE, marginLeft: 6, fontSize: 11 }}>{u.phone}</span>
+                                ) : null}
+                              </td>
+                              <td style={{ padding: "10px 14px", color: MUTED, whiteSpace: "nowrap" }}>
+                                {u.role_name || "—"}
+                              </td>
+                              <td
+                                style={{
+                                  padding: "10px 14px",
+                                  textAlign: "right",
+                                  fontWeight: 600,
+                                  color: TEXT,
+                                  fontVariantNumeric: "tabular-nums",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {u.total_tokens.toLocaleString()}
+                              </td>
+                              <td style={{ padding: "10px 14px", textAlign: "right", whiteSpace: "nowrap" }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
+                                  <div style={{ width: 56, height: 6, borderRadius: 3, background: "#F1EFE8", overflow: "hidden" }}>
+                                    <div
+                                      style={{
+                                        width: `${Math.min(100, u.percent)}%`,
+                                        height: "100%",
+                                        background: u.known ? PRIMARY : SUBTLE,
+                                      }}
+                                    />
+                                  </div>
+                                  <span style={{ color: MUTED, fontVariantNumeric: "tabular-nums", fontSize: 11.5 }}>
+                                    {u.percent.toFixed(2)}%
+                                  </span>
+                                </div>
+                              </td>
+                              {/* 本月额度（每人各自）：进度条 + 已用/额度 */}
+                              <td
+                                data-testid={`usage-quota-${i}`}
+                                style={{ padding: "10px 14px", textAlign: "right", whiteSpace: "nowrap" }}
+                              >
+                                {!u.known ? (
+                                  <span style={{ color: SUBTLE, fontSize: 11.5 }}>—</span>
+                                ) : u.quota_unlimited ? (
+                                  <span style={{ color: MUTED, fontSize: 11.5 }}>不限额</span>
+                                ) : (
+                                  <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
+                                    <div style={{ width: 56, height: 6, borderRadius: 3, background: "#F1EFE8", overflow: "hidden" }}>
+                                      <div
+                                        style={{
+                                          width: `${Math.min(100, u.quota_percent)}%`,
+                                          height: "100%",
+                                          background: u.quota_exceeded ? "#DC2626" : u.quota_percent >= 80 ? "#D97706" : "#0F6E56",
+                                        }}
+                                      />
+                                    </div>
+                                    <span
+                                      style={{
+                                        color: u.quota_exceeded ? "#DC2626" : MUTED,
+                                        fontSize: 11.5,
+                                        fontVariantNumeric: "tabular-nums",
+                                        fontWeight: u.quota_exceeded ? 600 : 400,
+                                      }}
+                                    >
+                                      {u.month_used.toLocaleString()} / {(u.quota / 10000).toLocaleString()}万
+                                      {u.quota_exceeded ? " · 已用完" : ""}
+                                    </span>
+                                  </div>
+                                )}
+                              </td>
+                              <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                                {u.prompt_tokens.toLocaleString()}
+                              </td>
+                              <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                                {u.completion_tokens.toLocaleString()}
+                              </td>
+                              <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                                {u.turns}
+                              </td>
+                              <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                                {u.tool_calls}
+                              </td>
+                              <td style={{ padding: "10px 14px", color: SUBTLE, whiteSpace: "nowrap", fontSize: 11.5 }}>
+                                {u.last_ts ? u.last_ts.replace("T", " ").slice(0, 16) : "—"}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                      <tfoot>
+                        <tr
+                          data-testid="usage-footer"
+                          style={{ borderTop: `2px solid ${BORDER}`, background: "#F8FAFC", fontWeight: 600 }}
+                        >
+                          <td style={{ padding: "10px 14px", color: TEXT }} colSpan={2}>
+                            合计
+                          </td>
+                          <td style={{ padding: "10px 14px", textAlign: "right", color: PRIMARY, fontVariantNumeric: "tabular-nums" }}>
+                            {usageData.self_check.users_sum.toLocaleString()}
+                          </td>
+                          <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED }}>100%</td>
+                          {/* 本月额度列：合计无意义（每人是各自的额度），给一行说明 */}
+                          <td
+                            data-testid="usage-footer-quota"
+                            style={{ padding: "10px 14px", textAlign: "right", color: SUBTLE, fontSize: 11.5, fontWeight: 400 }}
+                          >
+                            每人各自
+                          </td>
+                          <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                            {usageData.users.reduce((s, u) => s + u.prompt_tokens, 0).toLocaleString()}
+                          </td>
+                          <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                            {usageData.users.reduce((s, u) => s + u.completion_tokens, 0).toLocaleString()}
+                          </td>
+                          <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                            {usageData.users.reduce((s, u) => s + u.turns, 0)}
+                          </td>
+                          <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
+                            {usageData.users.reduce((s, u) => s + u.tool_calls, 0)}
+                          </td>
+                          <td style={{ padding: "10px 14px" }} />
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+
+                  {usageData.users.some((u) => !u.known) ? (
+                    <div
+                      data-testid="usage-unknown-hint"
+                      style={{
+                        padding: "11px 18px",
+                        borderTop: `1px solid ${BORDER}`,
+                        fontSize: 11.5,
+                        lineHeight: 1.7,
+                        color: "#B45309",
+                        background: "#FFFBEB",
+                      }}
+                    >
+                      「未知用户」是启用归属记录之前的历史消耗（无法追溯是谁用的）。它计入总量，
+                      因此在人均表里也保留一行 —— 否则各行相加会小于总量。
+                    </div>
+                  ) : null}
+                </div>
+
+                {usageData.totals.estimated_turns > 0 ? (
+                  <div style={{ marginTop: 12, fontSize: 11.5, color: "#B45309", lineHeight: 1.7 }}>
+                    其中 {usageData.totals.estimated_turns} 轮的用量是<span style={{ fontWeight: 600 }}>按字符数估算</span>的
+                    （供应商未返回真实用量），与真实值有偏差。
+                  </div>
+                ) : null}
+              </>
+            )}
+          </div>
+        )}
+
       </main>
 
       {/* ==================== 编辑渠道凭证弹窗 ==================== */}
@@ -4315,333 +4642,6 @@ export default function AgentPanelDashboard() {
           </div>
         ) : null}
       </Modal>
-
-      {/* ==================== 用量统计（token 消耗） ==================== */}
-      {tab === "usage" && (
-        <div style={{ marginTop: 4 }}>
-          {/* 口径切换 + 说明 */}
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
-            <div style={{ display: "inline-flex", border: `1px solid ${BORDER}`, borderRadius: 9, overflow: "hidden" }}>
-              {(["all", "today"] as const).map((sc) => (
-                <button
-                  key={sc}
-                  data-testid={`usage-scope-${sc}`}
-                  onClick={() => {
-                    setUsageScope(sc);
-                    loadTokenUsage(sc);
-                  }}
-                  style={{
-                    padding: "7px 16px",
-                    fontSize: 12.5,
-                    fontWeight: usageScope === sc ? 600 : 400,
-                    fontFamily: "inherit",
-                    border: "none",
-                    cursor: "pointer",
-                    background: usageScope === sc ? PRIMARY : "#fff",
-                    color: usageScope === sc ? "#fff" : MUTED,
-                  }}
-                >
-                  {sc === "all" ? "累计" : "今日"}
-                </button>
-              ))}
-            </div>
-            <button
-              data-testid="usage-refresh"
-              onClick={() => loadTokenUsage(usageScope)}
-              disabled={usageLoading}
-              style={{
-                padding: "7px 14px",
-                borderRadius: 8,
-                fontSize: 12.5,
-                fontWeight: 600,
-                fontFamily: "inherit",
-                border: `1px solid ${BORDER}`,
-                background: "#fff",
-                color: TEXT,
-                cursor: usageLoading ? "not-allowed" : "pointer",
-                opacity: usageLoading ? 0.6 : 1,
-              }}
-            >
-              {usageLoading ? "刷新中…" : "刷新"}
-            </button>
-            <span style={{ fontSize: 11.5, color: SUBTLE, lineHeight: 1.6 }}>
-              {usageData?.viewer.restricted
-                ? "口径：只统计归属本人的记录（真实用量优先，供应商未回时按字符数估算）。"
-                : "口径：agent_metrics 全表求和（真实用量优先，供应商未回时按字符数估算）。"}
-            </span>
-          </div>
-
-          {!usageData ? (
-            <div style={{ ...CARD, padding: 40, textAlign: "center", color: MUTED, fontSize: 13 }}>
-              {usageLoading ? "加载中…" : "暂无数据"}
-            </div>
-          ) : (
-            <>
-              {/* 总量卡 */}
-              <div
-                data-testid="usage-totals"
-                style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 16 }}
-              >
-                {[
-                  { k: "总 token", v: usageData.totals.total_tokens, c: PRIMARY },
-                  { k: "输入 token", v: usageData.totals.prompt_tokens, c: "#0F6E56" },
-                  { k: "输出 token", v: usageData.totals.completion_tokens, c: "#BA7517" },
-                  { k: "对话轮数", v: usageData.totals.turns, c: "#534AB7" },
-                ].map((it) => (
-                  <div key={it.k} style={{ ...CARD, padding: "16px 18px" }}>
-                    <div style={{ fontSize: 11.5, color: MUTED, marginBottom: 6 }}>{it.k}</div>
-                    <div
-                      data-testid={`usage-total-${it.k}`}
-                      style={{ fontSize: 22, fontWeight: 600, color: it.c, fontVariantNumeric: "tabular-nums" }}
-                    >
-                      {it.v.toLocaleString()}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {/* 按用户明细 */}
-              <div style={{ ...CARD, padding: 0, overflow: "hidden" }}>
-                <div
-                  style={{
-                    padding: "13px 18px",
-                    borderBottom: `1px solid ${BORDER}`,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: 12,
-                    flexWrap: "wrap",
-                  }}
-                >
-                  <div data-testid="usage-users-head" style={{ fontSize: 13.5, fontWeight: 600, color: TEXT }}>
-                    {usageData.viewer.restricted ? "我的用量" : "按用户统计"}
-                    <span style={{ fontSize: 11.5, fontWeight: 400, color: MUTED, marginLeft: 8 }}>
-                      {usageData.viewer.restricted
-                        ? "仅显示本人（管理员可查看全部用户）"
-                        : `共 ${usageData.user_count} 个用户`}
-                    </span>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                    <div
-                      data-testid="usage-scope-hint"
-                      style={{
-                        fontSize: 11.5,
-                        padding: "4px 10px",
-                        borderRadius: 6,
-                        fontWeight: 600,
-                        background: usageData.viewer.restricted ? "#EFF6FF" : "#F1F5F9",
-                        color: usageData.viewer.restricted ? "#1D4ED8" : MUTED,
-                      }}
-                    >
-                      {usageData.viewer.restricted ? "范围：仅本人" : "范围：全部用户"}
-                    </div>
-                    <div
-                      data-testid="usage-selfcheck"
-                      style={{
-                        fontSize: 11.5,
-                        padding: "4px 10px",
-                        borderRadius: 6,
-                        fontWeight: 600,
-                        background: usageData.self_check.consistent ? "#EAF3DE" : "#FCEBEB",
-                        color: usageData.self_check.consistent ? "#3B6D11" : "#A32D2D",
-                      }}
-                    >
-                      {usageData.self_check.consistent
-                        ? `合计一致 · ${usageData.self_check.users_sum.toLocaleString()} = 总量`
-                        : `⚠️ 合计 ${usageData.self_check.users_sum.toLocaleString()} ≠ 总量 ${usageData.self_check.grand_total.toLocaleString()}`}
-                    </div>
-                  </div>
-                </div>
-
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
-                    <thead>
-                      <tr style={{ background: "#F8FAFC", color: MUTED }}>
-                        {["用户", "角色", "总 token", "占比", "本月额度", "输入", "输出", "轮数", "工具调用", "最近使用"].map((h) => (
-                          <th
-                            key={h}
-                            style={{
-                              textAlign: h === "用户" || h === "角色" || h === "最近使用" ? "left" : "right",
-                              padding: "9px 14px",
-                              fontWeight: 600,
-                              fontSize: 11.5,
-                              whiteSpace: "nowrap",
-                            }}
-                          >
-                            {h}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {usageData.users.length === 0 ? (
-                        <tr>
-                          <td colSpan={10} style={{ padding: 28, textAlign: "center", color: SUBTLE }}>
-                            暂无消耗记录
-                          </td>
-                        </tr>
-                      ) : (
-                        usageData.users.map((u, i) => (
-                          <tr
-                            key={`${u.phone}-${u.name}-${i}`}
-                            data-testid={`usage-row-${i}`}
-                            style={{ borderTop: `1px solid ${BORDER}` }}
-                          >
-                            <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>
-                              <span style={{ fontWeight: 500, color: u.known ? TEXT : SUBTLE }}>{u.name}</span>
-                              {u.phone ? (
-                                <span style={{ color: SUBTLE, marginLeft: 6, fontSize: 11 }}>{u.phone}</span>
-                              ) : null}
-                            </td>
-                            <td style={{ padding: "10px 14px", color: MUTED, whiteSpace: "nowrap" }}>
-                              {u.role_name || "—"}
-                            </td>
-                            <td
-                              style={{
-                                padding: "10px 14px",
-                                textAlign: "right",
-                                fontWeight: 600,
-                                color: TEXT,
-                                fontVariantNumeric: "tabular-nums",
-                                whiteSpace: "nowrap",
-                              }}
-                            >
-                              {u.total_tokens.toLocaleString()}
-                            </td>
-                            <td style={{ padding: "10px 14px", textAlign: "right", whiteSpace: "nowrap" }}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
-                                <div style={{ width: 56, height: 6, borderRadius: 3, background: "#F1EFE8", overflow: "hidden" }}>
-                                  <div
-                                    style={{
-                                      width: `${Math.min(100, u.percent)}%`,
-                                      height: "100%",
-                                      background: u.known ? PRIMARY : SUBTLE,
-                                    }}
-                                  />
-                                </div>
-                                <span style={{ color: MUTED, fontVariantNumeric: "tabular-nums", fontSize: 11.5 }}>
-                                  {u.percent.toFixed(2)}%
-                                </span>
-                              </div>
-                            </td>
-                            {/* 本月额度（每人各自）：进度条 + 已用/额度 */}
-                            <td
-                              data-testid={`usage-quota-${i}`}
-                              style={{ padding: "10px 14px", textAlign: "right", whiteSpace: "nowrap" }}
-                            >
-                              {!u.known ? (
-                                <span style={{ color: SUBTLE, fontSize: 11.5 }}>—</span>
-                              ) : u.quota_unlimited ? (
-                                <span style={{ color: MUTED, fontSize: 11.5 }}>不限额</span>
-                              ) : (
-                                <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
-                                  <div style={{ width: 56, height: 6, borderRadius: 3, background: "#F1EFE8", overflow: "hidden" }}>
-                                    <div
-                                      style={{
-                                        width: `${Math.min(100, u.quota_percent)}%`,
-                                        height: "100%",
-                                        background: u.quota_exceeded ? "#DC2626" : u.quota_percent >= 80 ? "#D97706" : "#0F6E56",
-                                      }}
-                                    />
-                                  </div>
-                                  <span
-                                    style={{
-                                      color: u.quota_exceeded ? "#DC2626" : MUTED,
-                                      fontSize: 11.5,
-                                      fontVariantNumeric: "tabular-nums",
-                                      fontWeight: u.quota_exceeded ? 600 : 400,
-                                    }}
-                                  >
-                                    {u.month_used.toLocaleString()} / {(u.quota / 10000).toLocaleString()}万
-                                    {u.quota_exceeded ? " · 已用完" : ""}
-                                  </span>
-                                </div>
-                              )}
-                            </td>
-                            <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
-                              {u.prompt_tokens.toLocaleString()}
-                            </td>
-                            <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
-                              {u.completion_tokens.toLocaleString()}
-                            </td>
-                            <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
-                              {u.turns}
-                            </td>
-                            <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
-                              {u.tool_calls}
-                            </td>
-                            <td style={{ padding: "10px 14px", color: SUBTLE, whiteSpace: "nowrap", fontSize: 11.5 }}>
-                              {u.last_ts ? u.last_ts.replace("T", " ").slice(0, 16) : "—"}
-                            </td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                    <tfoot>
-                      <tr
-                        data-testid="usage-footer"
-                        style={{ borderTop: `2px solid ${BORDER}`, background: "#F8FAFC", fontWeight: 600 }}
-                      >
-                        <td style={{ padding: "10px 14px", color: TEXT }} colSpan={2}>
-                          合计
-                        </td>
-                        <td style={{ padding: "10px 14px", textAlign: "right", color: PRIMARY, fontVariantNumeric: "tabular-nums" }}>
-                          {usageData.self_check.users_sum.toLocaleString()}
-                        </td>
-                        <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED }}>100%</td>
-                        {/* 本月额度列：合计无意义（每人是各自的额度），给一行说明 */}
-                        <td
-                          data-testid="usage-footer-quota"
-                          style={{ padding: "10px 14px", textAlign: "right", color: SUBTLE, fontSize: 11.5, fontWeight: 400 }}
-                        >
-                          每人各自
-                        </td>
-                        <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
-                          {usageData.users.reduce((s, u) => s + u.prompt_tokens, 0).toLocaleString()}
-                        </td>
-                        <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
-                          {usageData.users.reduce((s, u) => s + u.completion_tokens, 0).toLocaleString()}
-                        </td>
-                        <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
-                          {usageData.users.reduce((s, u) => s + u.turns, 0)}
-                        </td>
-                        <td style={{ padding: "10px 14px", textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
-                          {usageData.users.reduce((s, u) => s + u.tool_calls, 0)}
-                        </td>
-                        <td style={{ padding: "10px 14px" }} />
-                      </tr>
-                    </tfoot>
-                  </table>
-                </div>
-
-                {usageData.users.some((u) => !u.known) ? (
-                  <div
-                    data-testid="usage-unknown-hint"
-                    style={{
-                      padding: "11px 18px",
-                      borderTop: `1px solid ${BORDER}`,
-                      fontSize: 11.5,
-                      lineHeight: 1.7,
-                      color: "#B45309",
-                      background: "#FFFBEB",
-                    }}
-                  >
-                    「未知用户」是启用归属记录之前的历史消耗（无法追溯是谁用的）。它计入总量，
-                    因此在人均表里也保留一行 —— 否则各行相加会小于总量。
-                  </div>
-                ) : null}
-              </div>
-
-              {usageData.totals.estimated_turns > 0 ? (
-                <div style={{ marginTop: 12, fontSize: 11.5, color: "#B45309", lineHeight: 1.7 }}>
-                  其中 {usageData.totals.estimated_turns} 轮的用量是<span style={{ fontWeight: 600 }}>按字符数估算</span>的
-                  （供应商未返回真实用量），与真实值有偏差。
-                </div>
-              ) : null}
-            </>
-          )}
-        </div>
-      )}
 
       {/* ==================== 删除模型确认弹窗 ==================== */}
       <Modal

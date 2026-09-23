@@ -8,9 +8,24 @@ interface ModalProps {
   title: string;
   children: React.ReactNode;
   width?: string;
+  /**
+   * 内容区内边距，默认 "24px"（既有弹窗行为不变）。
+   * ⚠️ 底部有 sticky 吸底操作区的弹窗必须传 `"24px 24px 0"`：
+   * 滚动容器的 padding 区也能显示滚动内容，而 sticky 元素被限制在父级 content box 内，
+   * 永远盖不住 body 的 padding-bottom —— 那 24px 里会漏出下层内容。
+   * 把底部内边距交给吸底区自己的 padding 承担，即可彻底盖住。
+   */
+  bodyPadding?: string;
 }
 
-export default function Modal({ open, onClose, title, children, width = "460px" }: ModalProps) {
+export default function Modal({
+  open,
+  onClose,
+  title,
+  children,
+  width = "460px",
+  bodyPadding = "24px",
+}: ModalProps) {
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -125,7 +140,7 @@ export default function Modal({ open, onClose, title, children, width = "460px" 
         {/* 内容（超高时在这里滚动，标题与底部按钮保持可见） */}
         <div
           data-testid="modal-body"
-          style={{ padding: "24px", overflowY: "auto", flex: "1 1 auto", minHeight: 0 }}
+          style={{ padding: bodyPadding, overflowY: "auto", flex: "1 1 auto", minHeight: 0 }}
         >
           {children}
         </div>

@@ -10,7 +10,7 @@
     "id": "ROLE-2026-0001",
     "createdAt": "2026-06-01 00:00",
     "name": "管理员",
-    "monthlyTokenQuota": 1000000,
+    "monthlyTokenQuota": 0,
     "permissions": [
       {
         "pageKey": "dashboard",
@@ -82,7 +82,10 @@
         "pageKey": "communications",
         "pageLabel": "沟通记录",
         "functions": [
-          "查看"
+          "查看",
+          "修改",
+          "增加",
+          "删除"
         ],
         "dataScope": "全部"
       },
@@ -90,7 +93,10 @@
         "pageKey": "chat",
         "pageLabel": "AI 助手",
         "functions": [
-          "查看"
+          "查看",
+          "修改",
+          "增加",
+          "删除"
         ],
         "dataScope": "全部"
       },
@@ -99,7 +105,9 @@
         "pageLabel": "Agent 控制面板",
         "functions": [
           "查看",
-          "修改"
+          "修改",
+          "增加",
+          "删除"
         ],
         "dataScope": "全部"
       },
@@ -109,7 +117,8 @@
         "functions": [
           "查看",
           "增加",
-          "删除"
+          "删除",
+          "修改"
         ],
         "dataScope": "全部"
       },
@@ -118,7 +127,9 @@
         "pageLabel": "AI 生成文件管理",
         "functions": [
           "查看",
-          "删除"
+          "删除",
+          "修改",
+          "增加"
         ],
         "dataScope": "全部"
       },

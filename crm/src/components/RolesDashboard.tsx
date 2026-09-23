@@ -113,8 +113,16 @@ function PermissionSettingsModal({
     );
   };
 
+  // ⚠️ bodyPadding 底部置 0：底部内边距交给吸底操作区自己的 padding 承担，
+  // 否则 sticky 按钮行永远盖不住 body 的 padding-bottom，那里会漏出下层内容。
   return (
-    <Modal open={open} onClose={onClose} title={`权限设置 - ${roleName}`} width="720px">
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={`权限设置 - ${roleName}`}
+      width="720px"
+      bodyPadding="24px 24px 0"
+    >
       <div style={{ fontSize: 12, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
         勾选页面以启用权限，并在对应行设置功能权限和数据权限。
       </div>
@@ -344,7 +352,28 @@ function PermissionSettingsModal({
         )}
       </div>
 
-      <div style={{ display: "flex", gap: 10, marginTop: 20, paddingTop: 16, borderTop: "1px solid #E2E8F0", position: "sticky", bottom: 0, background: "#fff" }}>
+      {/* ⚠️ 吸底操作区三件事缺一即「盖不住」：
+          ① 左右负 margin 抵消 Modal body 的 24px 内边距 → 白底横向铺满整宽
+             （sticky 元素默认只有内容区宽度，两侧 24px 会漏出下层内容）；
+          ② 底部内边距由 `bodyPadding="24px 24px 0"` 归零 → body 的 content box
+             下缘与弹窗底部重合，按钮行才能一直贴到底（sticky 被限制在父级 content box 内，
+             盖不住父级 padding-bottom）；
+          ③ zIndex 抬层级 + 圆角贴合弹窗底部。 */}
+      <div
+        style={{
+          display: "flex",
+          gap: 10,
+          position: "sticky",
+          bottom: 0,
+          zIndex: 2,
+          margin: "20px -24px 0",
+          padding: "16px 24px 20px",
+          borderTop: "1px solid #E2E8F0",
+          background: "#fff",
+          borderBottomLeftRadius: 16,
+          borderBottomRightRadius: 16,
+        }}
+      >
         <button
           data-testid="role-perm-save"
           onClick={handleSave}
@@ -355,7 +384,8 @@ function PermissionSettingsModal({
             borderRadius: 10,
             fontWeight: 600,
             fontSize: "13.5px",
-            border: "none",
+            // 与「取消」的 1px 边框对齐，两个 flex:1 按钮严格等宽
+            border: "1px solid transparent",
             background: quotaValid ? "#2563EB" : "#94A3B8",
             color: "#fff",
             cursor: quotaValid ? "pointer" : "not-allowed",
