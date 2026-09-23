@@ -25,10 +25,11 @@ import json
 import os
 import queue
 import threading
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from langchain_core.tools import tool
@@ -53,6 +54,21 @@ REDIRECT_URI = os.environ.get("FEISHU_REDIRECT_URI", "").strip() or \
 # 搜通讯录所需的 OAuth scope：搜索用户（contact:user:search，飞书权限列表「搜索用户」的标识）
 # + 读取用户基本信息 + 长期刷新
 SEARCH_SCOPE = "contact:user:search contact:user.base:readonly offline_access"
+
+# 日历所需的 OAuth scope：calendar:calendar（「更新日历及日程信息」，
+# 已包含 readonly 的全部授权：创建/更新日程 + 获取日历、日程、忙闲）
+CALENDAR_SCOPE = "calendar:calendar"
+
+# 用户 OAuth 授权时申请的完整 scope（搜通讯录 + 日历，空格分隔）。
+# ⚠️ 这里每一项都必须先在飞书开发者后台「权限管理」开通并发布版本，
+#    否则授权页会报「当前应用未申请该权限」导致用户无法完成授权。
+AUTH_SCOPE = f"{SEARCH_SCOPE} {CALENDAR_SCOPE}"
+
+# 飞书开放平台 API 根地址（日历接口拼路径用）
+FEISHU_API_BASE = "https://open.feishu.cn/open-apis"
+
+# 日历时间解析用的固定 UTC 偏移（形如 "+08:00"）；可用环境变量覆盖
+CALENDAR_TZ_OFFSET = os.environ.get("FEISHU_CALENDAR_TZ_OFFSET", "").strip() or "+08:00"
 
 # user_access_token 持久化文件（gitignore；含密钥）
 USER_TOKEN_FILE = Path(__file__).resolve().parent / "feishu_user_token.json"
@@ -335,6 +351,15 @@ def _calendar_request(method: str, path: str, body: dict | None = None,
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             d = json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        # ⚠️ 飞书在 4xx/5xx 时仍返回 JSON 体（含 code/msg），而 urlopen 遇 4xx 会直接抛异常、
+        #    把 body 丢掉 —— 那样就拿不到「权限不足(99991679)」这类准确原因，
+        #    下面 _permission_hint 的引导提示也就永远触发不了。此处必须把 body 读出来。
+        try:
+            d = json.loads(e.read().decode())
+        except Exception:  # noqa: BLE001
+            return {"ok": False, "code": -2,
+                    "msg": f"请求异常：HTTP {e.code} {e.reason}", "data": {}}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "code": -2, "msg": f"请求异常：{e}", "data": {}}
     return {"ok": d.get("code") == 0, "code": d.get("code", -3),
