@@ -526,23 +526,33 @@ export default function AgentPanelDashboard() {
   }, []);
 
   // ---- token 消耗统计（总量 + 按用户） ----
+  // ⚠️ 可见范围由**服务端**自算（读角色的「Agent 控制面板」页 dataScope）：
+  //    全部 → 所有用户；仅自己 / 身份解析不到 → 只返回本人（拿不到身份则空集）。
+  //    前端只声明「我是谁」，绝不传范围。
   const [usageData, setUsageData] = useState<TokenUsageResponse | null>(null);
   const [usageScope, setUsageScope] = useState<"all" | "today">("all");
   const [usageLoading, setUsageLoading] = useState(false);
 
-  const loadTokenUsage = useCallback(async (scope: "all" | "today" = "all") => {
-    setUsageLoading(true);
-    try {
-      const res = await fetch(`/api/agent/panel/token-usage?scope=${scope}`, { cache: "no-store" });
-      if (!res.ok) throw new Error(String(res.status));
-      setUsageData((await res.json()) as TokenUsageResponse);
-      setError("");
-    } catch {
-      setError("无法连接 Agent 服务，请确认 DeepAgents 服务（8765）已启动。");
-    } finally {
-      setUsageLoading(false);
-    }
-  }, []);
+  const panelScopeParams = perm.scopeParams;
+
+  const loadTokenUsage = useCallback(
+    async (scope: "all" | "today" = "all") => {
+      setUsageLoading(true);
+      try {
+        const q = panelScopeParams();
+        q.set("scope", scope);
+        const res = await fetch(`/api/agent/panel/token-usage?${q.toString()}`, { cache: "no-store" });
+        if (!res.ok) throw new Error(String(res.status));
+        setUsageData((await res.json()) as TokenUsageResponse);
+        setError("");
+      } catch {
+        setError("无法连接 Agent 服务，请确认 DeepAgents 服务（8765）已启动。");
+      } finally {
+        setUsageLoading(false);
+      }
+    },
+    [panelScopeParams]
+  );
 
   useEffect(() => {
     loadOverview();
@@ -4355,7 +4365,9 @@ export default function AgentPanelDashboard() {
               {usageLoading ? "刷新中…" : "刷新"}
             </button>
             <span style={{ fontSize: 11.5, color: SUBTLE, lineHeight: 1.6 }}>
-              口径：agent_metrics 全表求和（真实用量优先，供应商未回时按字符数估算）。
+              {usageData?.viewer.restricted
+                ? "口径：只统计归属本人的记录（真实用量优先，供应商未回时按字符数估算）。"
+                : "口径：agent_metrics 全表求和（真实用量优先，供应商未回时按字符数估算）。"}
             </span>
           </div>
 
@@ -4401,26 +4413,43 @@ export default function AgentPanelDashboard() {
                     flexWrap: "wrap",
                   }}
                 >
-                  <div style={{ fontSize: 13.5, fontWeight: 600, color: TEXT }}>
-                    按用户统计
+                  <div data-testid="usage-users-head" style={{ fontSize: 13.5, fontWeight: 600, color: TEXT }}>
+                    {usageData.viewer.restricted ? "我的用量" : "按用户统计"}
                     <span style={{ fontSize: 11.5, fontWeight: 400, color: MUTED, marginLeft: 8 }}>
-                      共 {usageData.user_count} 个用户
+                      {usageData.viewer.restricted
+                        ? "仅显示本人（管理员可查看全部用户）"
+                        : `共 ${usageData.user_count} 个用户`}
                     </span>
                   </div>
-                  <div
-                    data-testid="usage-selfcheck"
-                    style={{
-                      fontSize: 11.5,
-                      padding: "4px 10px",
-                      borderRadius: 6,
-                      fontWeight: 600,
-                      background: usageData.self_check.consistent ? "#EAF3DE" : "#FCEBEB",
-                      color: usageData.self_check.consistent ? "#3B6D11" : "#A32D2D",
-                    }}
-                  >
-                    {usageData.self_check.consistent
-                      ? `合计一致 · ${usageData.self_check.users_sum.toLocaleString()} = 总量`
-                      : `⚠️ 合计 ${usageData.self_check.users_sum.toLocaleString()} ≠ 总量 ${usageData.self_check.grand_total.toLocaleString()}`}
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <div
+                      data-testid="usage-scope-hint"
+                      style={{
+                        fontSize: 11.5,
+                        padding: "4px 10px",
+                        borderRadius: 6,
+                        fontWeight: 600,
+                        background: usageData.viewer.restricted ? "#EFF6FF" : "#F1F5F9",
+                        color: usageData.viewer.restricted ? "#1D4ED8" : MUTED,
+                      }}
+                    >
+                      {usageData.viewer.restricted ? "范围：仅本人" : "范围：全部用户"}
+                    </div>
+                    <div
+                      data-testid="usage-selfcheck"
+                      style={{
+                        fontSize: 11.5,
+                        padding: "4px 10px",
+                        borderRadius: 6,
+                        fontWeight: 600,
+                        background: usageData.self_check.consistent ? "#EAF3DE" : "#FCEBEB",
+                        color: usageData.self_check.consistent ? "#3B6D11" : "#A32D2D",
+                      }}
+                    >
+                      {usageData.self_check.consistent
+                        ? `合计一致 · ${usageData.self_check.users_sum.toLocaleString()} = 总量`
+                        : `⚠️ 合计 ${usageData.self_check.users_sum.toLocaleString()} ≠ 总量 ${usageData.self_check.grand_total.toLocaleString()}`}
+                    </div>
                   </div>
                 </div>
 

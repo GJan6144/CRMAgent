@@ -322,9 +322,22 @@ export interface TokenUsageUser {
   quota_exceeded: boolean;
 }
 
+/** 查看者与其可见范围（服务端自算；前端只做展示） */
+export interface TokenUsageViewer {
+  /** true = 只看得到本人的用量（非管理员 / 身份解析不到） */
+  restricted: boolean;
+  name: string;
+  phone: string;
+  role_name: string;
+  /** 口径文案：「仅本人」 / 「全部用户」 */
+  label: string;
+}
+
 /** token 消耗统计响应（总量 + 按用户拆分） */
 export interface TokenUsageResponse {
   scope: "all" | "today";
+  /** 当前查看者的可见范围 */
+  viewer: TokenUsageViewer;
   totals: {
     turns: number;
     prompt_tokens: number;

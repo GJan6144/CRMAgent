@@ -8,6 +8,8 @@
   5. ⚠️ 核心断言：**各用户 total 合计 === 总量**（含「未知用户」）
   6. 历史无归属行归入「未知用户」，不被丢弃
   7. scope=today / 非法 scope
+  8. ★ 查看者范围：restricted → 只见本人（总量=本人合计，self_check 仍自洽）；
+     **无身份 → 空集**（不退化成一个不过滤的查询）
 
 ⚠️ 会对 chat.db 的真实表做写入 —— 用独立临时 DB 跑，避免污染真实统计。
 """
@@ -239,7 +241,65 @@ check("today 总量 <= 全量总量",
       f"{res_today['totals']['total_tokens']} vs {tot['total_tokens']}")
 
 # ==========================================================================
-# 5. 还原
+# 5. 查看者范围：普通用户只看本人，管理员才看全部
+# ==========================================================================
+print()
+print("=" * 70)
+print("5. 查看者范围（viewer / restricted）")
+print("=" * 70)
+
+# --- 管理员口径：viewer=None → 不限 ---
+r_all = server._token_usage("all", None)
+check("viewer=None → 不限（与全量一致）",
+      [u["name"] for u in r_all["users"]] == [u["name"] for u in res["users"]],
+      [u["name"] for u in r_all["users"]])
+check("不限时 viewer.label = 全部用户", r_all["viewer"]["label"] == "全部用户", r_all["viewer"])
+check("不限时 viewer.restricted = False", r_all["viewer"]["restricted"] is False, r_all["viewer"])
+
+# --- 受限：张明只能看到自己 ---
+VIEWER_ZHANG = {"restricted": True, "phone": ident_a["user_phone"],
+                "name": ident_a["user_name"], "role_name": "销售"}
+r_zm = server._token_usage("all", VIEWER_ZHANG)
+check("★ 受限：只剩本人一行",
+      len(r_zm["users"]) == 1 and r_zm["users"][0]["name"] == "张明",
+      [u["name"] for u in r_zm["users"]])
+check(f"★ 受限：总量 = 本人合计 {exp_zhang}",
+      r_zm["totals"]["total_tokens"] == exp_zhang, r_zm["totals"]["total_tokens"])
+check("★ 受限：看不到他人（无李华 / 管理员 / 未知用户）",
+      all(u["name"] == "张明" for u in r_zm["users"]), [u["name"] for u in r_zm["users"]])
+check("受限：self_check 仍自洽（delta=0）", r_zm["self_check"]["delta"] == 0, r_zm["self_check"])
+check("受限：viewer.label = 仅本人", r_zm["viewer"]["label"] == "仅本人", r_zm["viewer"])
+check("受限：总量严格小于全量",
+      r_zm["totals"]["total_tokens"] < r_all["totals"]["total_tokens"],
+      f"{r_zm['totals']['total_tokens']} vs {r_all['totals']['total_tokens']}")
+check("受限：user_count = 1", r_zm["user_count"] == 1, r_zm["user_count"])
+
+# --- 只给 phone（不给 name）也要能命中 ---
+r_ph = server._token_usage("all", {"restricted": True, "phone": ident_a["user_phone"], "name": ""})
+check("受限：只给 phone 也能命中本人",
+      r_ph["totals"]["total_tokens"] == exp_zhang, r_ph["totals"]["total_tokens"])
+
+# --- ⚠️⚠️ 拿不到身份 → 空集（裸调接口不泄露他人用量）---
+r_nobody = server._token_usage("all", {"restricted": True, "phone": "", "name": ""})
+check("★ 无身份 → 空集（安全默认，不退化成一个不过滤的查询）",
+      r_nobody["totals"]["total_tokens"] == 0 and len(r_nobody["users"]) == 0,
+      r_nobody["totals"])
+check("无身份 → self_check 仍自洽（0 = 0）", r_nobody["self_check"]["consistent"], r_nobody["self_check"])
+check("无身份 → user_count = 0", r_nobody["user_count"] == 0, r_nobody["user_count"])
+
+# --- 身份查不到（库里没有这个人的消耗）→ 也是空集 ---
+r_ghost = server._token_usage("all", {"restricted": True, "phone": "19900000000", "name": "查无此人"})
+check("查无此人 → 空集", r_ghost["totals"]["total_tokens"] == 0, r_ghost["totals"])
+
+# --- today 口径下受限仍自洽 ---
+r_zm_today = server._token_usage("today", VIEWER_ZHANG)
+check("受限 + today 自洽（delta=0 且不超过本人累计）",
+      r_zm_today["self_check"]["delta"] == 0
+      and r_zm_today["totals"]["total_tokens"] <= exp_zhang,
+      r_zm_today["self_check"])
+
+# ==========================================================================
+# 6. 还原
 # ==========================================================================
 server.DB_PATH = _orig_db
 import shutil

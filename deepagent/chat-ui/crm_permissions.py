@@ -37,6 +37,7 @@ from typing import Any
 # --------------------------------------------------------------------------
 
 AGENT_PAGE_KEY = "chat"          # 「AI 助手」页 —— Agent 数据范围的配置来源
+PANEL_PAGE_KEY = "agent"         # 「Agent 控制面板」页 —— 用量统计可见范围的配置来源
 SCOPE_ALL = "全部"
 SCOPE_SELF = "仅自己"
 
@@ -123,22 +124,47 @@ def page_scope(role: dict[str, Any] | None, page_key: str = AGENT_PAGE_KEY) -> s
     return SCOPE_ALL
 
 
+def page_is_configured(role: dict[str, Any] | None, page_key: str = AGENT_PAGE_KEY) -> bool:
+    """该角色是否**显式配置**了这个页面（permissions 里有对应的 pageKey）。
+
+    ⚠️ 与 ``page_scope`` 的区别（很关键）：
+        ``page_scope`` 在「页面缺失 / 角色缺失」时回落「全部」—— 这是为了**不收紧**
+        Agent 的既有行为；但 ``page_is_configured`` 返回 ``False``。
+        需要「没配 = 没授权」的隐私敏感场景（如用量统计谁可见）必须用本函数，
+        否则一个 ``permissions: []`` 的角色会意外拿到「全部」。
+    """
+    if not role:
+        return False
+    perms = role.get("permissions")
+    if not isinstance(perms, list):
+        return False
+    return any(
+        isinstance(p, dict) and str(p.get("pageKey", "")) == page_key for p in perms
+    )
+
+
 def resolve_agent_scope(
     phone: str = "",
     user_id: str = "",
     name: str = "",
     role_id: str = "",
     role_name: str = "",
+    page_key: str = AGENT_PAGE_KEY,
 ) -> dict[str, Any]:
-    """解析「当前用户 + 其 Agent 数据范围」。
+    """解析「当前用户 + 其在某个页面上的数据范围」。
 
     身份可只给一部分：优先用账号（phone/id/name）反查其 roleId / roleName；
     账号查不到时，退回用请求里带的 role_id / role_name。
+
+    ``page_key`` 默认「AI 助手」（Agent 业务工具的数据范围）；查「Agent 控制面板」
+    的可见范围时传 ``PANEL_PAGE_KEY``。
 
     返回：
         {
           "found": bool,           # 是否解析到账号或角色
           "scope": "全部" | "仅自己",
+          "page_key": str,
+          "page_configured": bool, # 角色里是否**显式配了**该页面（未配 ≠ 全部）
           "user_name": str,        # 用于与业务数据的归属字段比对
           "user_phone": str,
           "role_id": str, "role_name": str,
@@ -154,11 +180,13 @@ def resolve_agent_scope(
     eff_role_name = str((acct or {}).get("roleName", "") or role_name or "").strip()
 
     role = find_role(eff_role_id, eff_role_name)
-    scope = page_scope(role, AGENT_PAGE_KEY)
+    scope = page_scope(role, page_key)
 
     return {
         "found": bool(acct or role),
         "scope": scope,
+        "page_key": page_key,
+        "page_configured": page_is_configured(role, page_key),
         "user_name": eff_name,
         "user_phone": eff_phone,
         "role_id": eff_role_id,
@@ -166,6 +194,27 @@ def resolve_agent_scope(
         "restricted": scope == SCOPE_SELF and bool(eff_name or eff_phone),
         "monthly_token_quota": role_monthly_quota(role),
     }
+
+
+def can_view_all_page_scope(info: dict[str, Any]) -> bool:
+    """**严格判定**：该身份能否看到某页面的「全部」数据。
+
+    ⚠️ 与 ``info["restricted"]`` 的区别：``restricted`` 沿用项目「范围解析不到就
+       不收紧」的既有约定（供 Agent 业务工具复用）；本函数用于隐私敏感的统计类
+       接口，三条**同时**满足才算「能看全部」：
+
+        ① 身份解析到了账号或角色（``found``）
+        ② 角色里**显式配置**了该页面（``page_configured``）—— 没配视为未授权
+        ③ 该页面的 ``dataScope == "全部"``
+
+    任一不满足 → ``False``（只看自己）。**拿不到身份 → 只看自己 → 空集**，
+    所以裸调接口（不带身份）不会泄露他人数据。
+    """
+    return (
+        bool(info.get("found"))
+        and bool(info.get("page_configured"))
+        and info.get("scope") == SCOPE_ALL
+    )
 
 
 def role_monthly_quota(role: dict[str, Any] | None) -> int:

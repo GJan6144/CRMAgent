@@ -28,8 +28,13 @@ BASE = "http://127.0.0.1:8765"
 
 # --- 会话隔离：会话接口要求声明调用方身份（见 server.py 会话隔离设计）---
 # 未带身份时：列表返回空、单会话按「不存在」返回 404。测试脚本必须带上。
-_IDENT = {"user_phone": '13912345678', "user_name": '系统管理员'}
-_Q = "user_phone=13912345678&user_name=%E7%B3%BB%E7%BB%9F%E7%AE%A1%E7%90%86%E5%91%98"
+# ⚠️⚠️ 身份**必须跟着调用方走**（谁发消息就带谁）—— 早先这里在创建会话时又追了一次
+#     管理员的 `**_IDENT`，把 `**ident` 覆盖掉 → 会话归了管理员，随后以销售身份
+#     /api/chat 就被判越权 404「Session not found」，A/C 两项恒失败。
+def _q(ident: dict) -> dict:
+    """把身份 dict 转成查询参数（供 approve / delete 这类走 query 的接口用）。"""
+    return {"user_phone": ident.get("user_phone", ""),
+            "user_name": ident.get("user_name", "")}
 
 CRM_DATA = Path(
     r"C:\Users\Administrator\Documents\deepagent\CRM_Agent1.0\data"
@@ -74,7 +79,7 @@ def send_chat(content: str, ident: dict, decide=None, timeout=300) -> str:
       - 正文 token 走 ``llm_token`` 事件，取 ``token`` 字段
       - write 类工具会 interrupt 阻塞等人工审批，必须有人回 /approve，否则挂死
     """
-    s = requests.post(f"{BASE}/api/sessions", json={"title": "范围验证", **ident, **_IDENT}, timeout=30)
+    s = requests.post(f"{BASE}/api/sessions", json={"title": "范围验证", **ident}, timeout=30)
     sid = s.json()["id"]
     text = ""
     try:
@@ -107,7 +112,7 @@ def send_chat(content: str, ident: dict, decide=None, timeout=300) -> str:
                         try:
                             requests.post(
                                 f"{BASE}/api/chat/{sid}/approve",
-                                params=_IDENT,
+                                params=_q(ident),
                                 json={"approved": decide, "session_id": sid},
                                 timeout=15,
                             )
@@ -121,7 +126,7 @@ def send_chat(content: str, ident: dict, decide=None, timeout=300) -> str:
         return text
     finally:
         try:
-            requests.delete(f"{BASE}/api/sessions/{sid}", params=_IDENT, timeout=10)
+            requests.delete(f"{BASE}/api/sessions/{sid}", params=_q(ident), timeout=10)
         except Exception:
             pass
 

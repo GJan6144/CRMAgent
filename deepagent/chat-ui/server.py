@@ -2411,12 +2411,40 @@ def panel_overview():
 UNKNOWN_OWNER_LABEL = "未知用户"
 
 
-def _token_usage(scope: str = "all") -> dict:
+def _token_usage(scope: str = "all", viewer: dict | None = None) -> dict:
     """统计 token 消耗：总量 + 按用户拆分。
 
-    ``scope``: ``"today"`` 只算当天（本地时区），``"all"`` 全部。
+    ``scope``:  ``"today"`` 只算当天（本地时区），``"all"`` 全部。
+
+    ``viewer``: **查看者**，决定能看到谁的用量（服务端自算，绝不接受前端传范围）。
+
+        - ``None`` → 不限（内部/测试直调；HTTP 入口一律显式传，不依赖默认值）
+        - ``{"restricted": True, "phone": ..., "name": ...}`` → 只统计归属该身份的
+          指标行；**phone / name 都拿不到 → 空集**（安全默认，不泄露他人用量）
+
+    ⚠️ restricted 时「总量」= **本人合计**（而非全表总量），这样「各行合计 = 总量」
+       的自检口径在两种视图下都成立，也不会把公司全局数字透给普通用户。
     """
-    where = "WHERE date(ts) = date('now','localtime')" if scope == "today" else ""
+    where_parts: list[str] = []
+    params: list[str] = []
+    if scope == "today":
+        where_parts.append("date(ts) = date('now','localtime')")
+
+    restricted = bool(viewer and viewer.get("restricted"))
+    if restricted:
+        conds: list[str] = []
+        o_params: list[str] = []
+        if (viewer or {}).get("phone"):
+            conds.append("owner_phone = ?")
+            o_params.append(str((viewer or {}).get("phone")))
+        if (viewer or {}).get("name"):
+            conds.append("owner_name = ?")
+            o_params.append(str((viewer or {}).get("name")))
+        # ⚠️ 两个身份字段都没有 → 恒假条件（返回空集），不要退化成「不过滤」
+        where_parts.append("(" + " OR ".join(conds) + ")" if conds else "0")
+        params += o_params
+
+    where = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
     db = get_db()
     # 总量
@@ -2429,7 +2457,8 @@ def _token_usage(scope: str = "all") -> dict:
                    COALESCE(SUM(tool_calls), 0) AS tool_calls,
                    COALESCE(SUM(tokens_estimated), 0) AS estimated_turns,
                    COALESCE(SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0) AS errors
-            FROM agent_metrics {where}"""
+            FROM agent_metrics {where}""",
+        params,
     ).fetchone()
 
     # 按用户聚合。⚠️ 归属为空的归入「未知用户」，**不能过滤掉** —— 否则合计会小于总量。
@@ -2444,7 +2473,8 @@ def _token_usage(scope: str = "all") -> dict:
                    MAX(ts) AS last_ts
             FROM agent_metrics {where}
             GROUP BY owner_phone, owner_name
-            ORDER BY total_tokens DESC"""
+            ORDER BY total_tokens DESC""",
+        params,
     ).fetchall()
     db.close()
 
@@ -2497,6 +2527,14 @@ def _token_usage(scope: str = "all") -> dict:
     users_sum = sum(u["total_tokens"] for u in users)
     return {
         "scope": scope,
+        # 查看者与其实可见范围 —— 供前端显示口径提示（判定全在服务端完成）
+        "viewer": {
+            "restricted": restricted,
+            "name": str((viewer or {}).get("name") or ""),
+            "phone": str((viewer or {}).get("phone") or ""),
+            "role_name": str((viewer or {}).get("role_name") or ""),
+            "label": "仅本人" if restricted else "全部用户",
+        },
         "totals": {
             "turns": int(total["turns"] or 0),
             "prompt_tokens": int(total["prompt_tokens"] or 0),
@@ -2648,14 +2686,44 @@ async def _quota_refuse_stream(session_id: str, text: str, model_id: str) -> Asy
 
 
 @app.get("/api/panel/token-usage")
-def panel_token_usage(scope: str = "all"):
+def panel_token_usage(
+    scope: str = "all",
+    user_phone: str = "",
+    user_name: str = "",
+    role_id: str = "",
+    role_name: str = "",
+):
     """token 消耗统计：总量 + 按用户拆分。
 
     ``scope``: ``all``（默认，累计） / ``today``（今日）。
+
+    **数据范围（服务端自算，前端只声明「我是谁」）**：
+      - 角色在「Agent 控制面板」页 ``dataScope == 全部``（且该页在角色里显式配置）
+        → 看所有用户
+      - 其余情况（含身份解析不到 / 没配该页面）→ **只看本人**；
+        拿不到任何身份 → 返回空列表
+
+    ⚠️ 前端**不能**传范围（传了就是可篡改的提权漏洞），只能传身份字段。
     """
     if scope not in ("all", "today"):
         raise HTTPException(status_code=422, detail="scope 只能是 all 或 today")
-    return _token_usage(scope)
+
+    info = crm_permissions.resolve_agent_scope(
+        phone=user_phone,
+        name=user_name,
+        role_id=role_id,
+        role_name=role_name,
+        page_key=crm_permissions.PANEL_PAGE_KEY,
+    )
+    # 严格判定：只有「身份可解析 + 该页显式配置 + 范围为全部」才放行全部用户
+    view_all = crm_permissions.can_view_all_page_scope(info)
+    viewer = {
+        "restricted": not view_all,
+        "phone": info.get("user_phone") or user_phone,
+        "name": info.get("user_name") or user_name,
+        "role_name": info.get("role_name") or role_name,
+    }
+    return _token_usage(scope, viewer)
 
 
 @app.post("/api/panel/model-check")

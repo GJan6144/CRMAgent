@@ -384,11 +384,21 @@ def _resolve_calendar_id(calendar_id: str) -> str:
         return cid
     res = _calendar_request("GET", "/calendar/v4/calendars/primary")
     if res["ok"]:
-        cals = res["data"].get("calendars") or []
-        if cals:
-            got = (cals[0].get("calendar") or {}).get("calendar_id", "")
-            if got:
-                return got
+        # ⚠️ 该接口返回的是**扁平结构**：主日历 id 直接在 data["calendar_id"]。
+        #    （形如 {"code":0,"data":{"calendar_id":"feishu.cn_xxx@group.calendar.feishu.cn",
+        #      "summary":"刘健","role":"owner","type":"primary"}}）
+        #    早期误按 data["calendars"][0]["calendar"]["calendar_id"] 取 → 永远取不到
+        #    → 静默降级成字面量 "primary"。之所以没暴露，只是因为飞书 events 接口
+        #    恰好也接受 "primary" 这个别名；一旦别名失效就会全线失效。
+        data = res["data"] or {}
+        got = str(data.get("calendar_id") or "").strip()
+        if not got:
+            # 兼容「列表结构」形态（部分日历接口返回 calendars[].calendar）
+            cals = data.get("calendars") or []
+            if cals:
+                got = str(((cals[0].get("calendar") or {}).get("calendar_id")) or "").strip()
+        if got:
+            return got
     return "primary"
 
 
