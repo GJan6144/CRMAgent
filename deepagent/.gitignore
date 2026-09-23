@@ -291,3 +291,9 @@ chat-ui/mcp_config.json
 chat-ui/feishu_user_token.json
 chat-ui/channel_config.json
 chat-ui/model_config.json
+
+# MCP 子服务的依赖（用 npm install 还原，不进版本库；排除后 mcp_servers/ 只剩 package*.json）
+chat-ui/mcp_servers/node_modules/
+
+# 基准测试产物目录
+chat-ui/.benchmarks/

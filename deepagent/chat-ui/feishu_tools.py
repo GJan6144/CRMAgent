@@ -489,6 +489,10 @@ def feishu_create_calendar_event(summary: str, start_time: str, end_time: str,
 def feishu_list_calendar_events(start_time: str, end_time: str, calendar_id: str = "primary") -> str:
     """查询某个时间段内的飞书日程（用户身份，需已完成授权且开通日历权限）。
 
+    ⚠️ 飞书日历的「取消」是**软删除**：记录仍留在列表里、标题被清空、`status=cancelled`。
+    这类记录对用户是噪音（会显示成「(无标题) | status=cancelled」），本工具**默认过滤**，
+    只在末尾给出被过滤的条数；返回里的「共 N 条」也只统计真正有效的日程。
+
     Args:
         start_time: 查询起始时间，支持 `2026-09-24 00:00` 或秒级时间戳。
         end_time: 查询结束时间，格式同上。
@@ -510,15 +514,24 @@ def feishu_list_calendar_events(start_time: str, end_time: str, calendar_id: str
                 f"{_permission_hint(res['code'], res['msg'])}")
 
     items = res["data"].get("items") or []
-    if not items:
-        return f"{_fmt_ts(start_ts)} ~ {_fmt_ts(end_ts)} 之间没有日程"
-    lines = [f"共 {len(items)} 条日程（{_fmt_ts(start_ts)} ~ {_fmt_ts(end_ts)}）："]
-    for it in items:
+    # 过滤「已取消」：飞书是软删除，记录不会消失，只是 status 变 cancelled、summary 被清空。
+    # 不过滤的话界面上就是一串「(无标题) | status=cancelled」，把真正有效的日程全淹了。
+    # ⚠️ status 缺失时按「有效」处理（不能因为字段缺失就把日程吞掉）。
+    kept = [it for it in items if str(it.get("status") or "confirmed").lower() != "cancelled"]
+    skipped = len(items) - len(kept)
+    tail = f"（已过滤 {skipped} 条已取消的日程）" if skipped else ""
+
+    if not kept:
+        return f"{_fmt_ts(start_ts)} ~ {_fmt_ts(end_ts)} 之间没有日程{tail}"
+    lines = [f"共 {len(kept)} 条日程（{_fmt_ts(start_ts)} ~ {_fmt_ts(end_ts)}）："]
+    for it in kept:
         s = (it.get("start_time") or {}).get("timestamp", "")
         e = (it.get("end_time") or {}).get("timestamp", "")
         tz = (it.get("start_time") or {}).get("timezone", "")
         span = f"{_fmt_ts(s)} ~ {_fmt_ts(e)}" if s and e else (it.get("start_time") or {}).get("date", "")
         lines.append(f"- {it.get('summary', '(无标题)')} | {span} {tz} | status={it.get('status', '')}")
+    if skipped:
+        lines.append(f"（另有 {skipped} 条已取消的日程未列出）")
     return "\n".join(lines)
 
 
