@@ -20,6 +20,12 @@ from crm_data_guard import install_guard
 install_guard()
 
 BASE = "http://127.0.0.1:8765"
+
+# --- 会话隔离：会话接口要求声明调用方身份（见 server.py 会话隔离设计）---
+# 未带身份时：列表返回空、单会话按「不存在」返回 404。测试脚本必须带上。
+_IDENT = {"user_phone": '13912345678', "user_name": '系统管理员'}
+_Q = "user_phone=13912345678&user_name=%E7%B3%BB%E7%BB%9F%E7%AE%A1%E7%90%86%E5%91%98"
+
 CRM_LEADS = r"C:\Users\Administrator\Documents\deepagent\CRM_Agent1.0\data\leads.json"
 
 PASS = FAIL = 0
@@ -41,7 +47,7 @@ def leads_rows():
 
 
 def make_session(title):
-    r = requests.post(f"{BASE}/api/sessions", json={"title": title}, timeout=15)
+    r = requests.post(f"{BASE}/api/sessions", json={"title": title, **_IDENT}, timeout=15)
     r.raise_for_status()
     return r.json()["id"]
 
@@ -51,7 +57,7 @@ def send(session_id, content, decide=None, timeout=600):
     events = []
     with requests.post(
         f"{BASE}/api/chat",
-        json={"session_id": session_id, "content": content, "use_search": False},
+        json={"session_id": session_id, "content": content, "use_search": False, **_IDENT},
         stream=True,
         timeout=timeout,
     ) as r:
@@ -75,6 +81,7 @@ def send(session_id, content, decide=None, timeout=600):
                     try:
                         requests.post(
                             f"{BASE}/api/chat/{session_id}/approve",
+                            params=_IDENT,
                             json={"approved": decide, "session_id": session_id},
                             timeout=15,
                         )
@@ -117,7 +124,7 @@ print("0. Agent 工具清单（crm_delete 作为拦截桩可见）")
 print("=" * 64)
 sid = make_session("__权限测试_工具清单__")
 try:
-    ctx = requests.get(f"{BASE}/api/context/{sid}", timeout=20).json()
+    ctx = requests.get(f"{BASE}/api/context/{sid}", params=_IDENT, timeout=20).json()
     tool_names_ctx = [t.get("name") for t in (ctx.get("tools") or [])]
     print("工具清单:", tool_names_ctx)
     check("0.1 crm_delete 作为拦截桩对模型可见", "crm_delete" in tool_names_ctx)
@@ -137,7 +144,7 @@ try:
     check("0.9 capabilities.blocked_event", caps.get("blocked_event") == "tool_blocked",
           str(caps.get("blocked_event")))
 finally:
-    requests.delete(f"{BASE}/api/sessions/{sid}", timeout=15)
+    requests.delete(f"{BASE}/api/sessions/{sid}", params=_IDENT, timeout=15)
 
 # ---------------------------------------------------------------- A. 查询直接执行
 print()
@@ -156,7 +163,7 @@ try:
     check("A3 无错误事件", k.get("error", 0) == 0, str(k))
     check("A4 有最终回复", len(reply_text(evs).strip()) > 0, reply_text(evs)[:80])
 finally:
-    requests.delete(f"{BASE}/api/sessions/{sid}", timeout=15)
+    requests.delete(f"{BASE}/api/sessions/{sid}", params=_IDENT, timeout=15)
 
 # ---------------------------------------------------------------- B. 修改 → 批准
 print()
@@ -187,7 +194,7 @@ try:
     check("B5 记录数不变", len(rows2) == len(rows), f"{len(rows)} -> {len(rows2)}")
     check("B6 无错误事件", k.get("error", 0) == 0, str(k))
 finally:
-    requests.delete(f"{BASE}/api/sessions/{sid}", timeout=15)
+    requests.delete(f"{BASE}/api/sessions/{sid}", params=_IDENT, timeout=15)
 
 # ---------------------------------------------------------------- C. 修改 → 拒绝
 print()
@@ -210,7 +217,7 @@ try:
           bool(hit) and hit[0].get("remark", "") == before_val,
           f"now={hit[0].get('remark','')!r}" if hit else "missing")
 finally:
-    requests.delete(f"{BASE}/api/sessions/{sid}", timeout=15)
+    requests.delete(f"{BASE}/api/sessions/{sid}", params=_IDENT, timeout=15)
 
 # ---------------------------------------------------------------- D. 新增 → 批准
 print()
@@ -235,7 +242,7 @@ try:
     hit = [r for r in leads_rows() if r.get("name") == "权限测试客户"]
     check("D4 新增记录内容正确", bool(hit) and hit[0].get("phone") == "13700001111", str(hit[:1])[:200])
 finally:
-    requests.delete(f"{BASE}/api/sessions/{sid}", timeout=15)
+    requests.delete(f"{BASE}/api/sessions/{sid}", params=_IDENT, timeout=15)
 
 # ---------------------------------------------------------------- E. 删除 → 禁止
 print()
@@ -276,7 +283,7 @@ try:
     check("E8 无错误事件", k.get("error", 0) == 0, str(k))
     check("E9 有回复（说明删除被禁用）", len(reply_text(evs).strip()) > 0, reply_text(evs)[:120])
 finally:
-    requests.delete(f"{BASE}/api/sessions/{sid}", timeout=15)
+    requests.delete(f"{BASE}/api/sessions/{sid}", params=_IDENT, timeout=15)
 
 print()
 print("=" * 64)

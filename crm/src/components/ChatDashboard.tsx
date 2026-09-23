@@ -1273,6 +1273,17 @@ export default function ChatDashboard() {
    * 由此决定 Agent 里 CRM 工具的读写范围。前端只声明身份，不声明权限。
    */
   const { user, role } = useAuth();
+  /**
+   * 会话隔离用的身份查询串：**所有**会话相关接口都要带上它。
+   * 服务端据此只返回属于本人的会话（未带身份 → 列表为空）。
+   * 前端只声明「我是谁」，隔离判定一律在服务端完成。
+   */
+  const identityQuery = useMemo(() => {
+    const p = new URLSearchParams();
+    if (user?.phone) p.set("user_phone", user.phone);
+    if (user?.name) p.set("user_name", user.name);
+    return p.toString();
+  }, [user?.phone, user?.name]);
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -1388,15 +1399,17 @@ export default function ChatDashboard() {
         return;
       }
       try {
-        const qs = model ? `?model=${encodeURIComponent(model)}` : "";
-        const res = await fetch(`/api/agent/sessions/${sessionId}/context${qs}`, { cache: "no-store" });
+        // 会话隔离：带上身份，否则服务端按「不属于你」处理（404）
+        const p = new URLSearchParams(identityQuery);
+        if (model) p.set("model", model);
+        const res = await fetch(`/api/agent/sessions/${sessionId}/context?${p.toString()}`, { cache: "no-store" });
         if (!res.ok) return;
         setContextUsage((await res.json()) as ContextUsage);
       } catch {
         /* 静默降级：拿不到就不显示图标 */
       }
     },
-    [],
+    [identityQuery],
   );
 
   /** 打开快捷指令设置（把当前配置拷成草稿） */
@@ -1459,7 +1472,8 @@ export default function ChatDashboard() {
 
   const loadSessions = useCallback(async (): Promise<AgentSession[]> => {
     try {
-      const res = await fetch("/api/agent/sessions", { cache: "no-store" });
+      // 会话隔离：只取**本人**的会话（服务端按 user_phone / user_name 过滤）
+      const res = await fetch(`/api/agent/sessions?${identityQuery}`, { cache: "no-store" });
       if (!res.ok) throw new Error(String(res.status));
       const data = (await res.json()) as AgentSession[];
       const list = Array.isArray(data) ? data : [];
@@ -1470,12 +1484,13 @@ export default function ChatDashboard() {
       markOffline();
       return [];
     }
-  }, [markOffline]);
+  }, [markOffline, identityQuery]);
 
   const loadMessages = useCallback(
     async (sessionId: string) => {
       try {
-        const res = await fetch(`/api/agent/sessions/${sessionId}/messages`, {
+        // 会话隔离：带上身份，读到别人的会话会被服务端按「不存在」拒绝（404）
+        const res = await fetch(`/api/agent/sessions/${sessionId}/messages?${identityQuery}`, {
           cache: "no-store",
         });
         if (!res.ok) throw new Error(String(res.status));
@@ -1531,7 +1546,7 @@ export default function ChatDashboard() {
         }
       }
     },
-    []
+    [identityQuery]
   );
 
   const createSession = useCallback(async (): Promise<AgentSession | null> => {
@@ -2101,7 +2116,8 @@ export default function ChatDashboard() {
         }))
       );
       try {
-        await fetch(`/api/agent/chat/${activeId}/approve`, {
+        // 会话隔离：审批也必须带身份，否则服务端按「不属于你」处理（404）
+        await fetch(`/api/agent/chat/${activeId}/approve?${identityQuery}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ approved, session_id: activeId }),
@@ -2110,7 +2126,7 @@ export default function ChatDashboard() {
         // 忽略
       }
     },
-    [activeId]
+    [activeId, identityQuery]
   );
 
   const handleDelete = useCallback(async () => {
@@ -2118,7 +2134,7 @@ export default function ChatDashboard() {
     const target = pendingDelete;
     setPendingDelete(null);
     try {
-      await fetch(`/api/agent/sessions/${target.id}`, { method: "DELETE" });
+      await fetch(`/api/agent/sessions/${target.id}?${identityQuery}`, { method: "DELETE" });
       setSessions((prev) => prev.filter((s) => s.id !== target.id));
       if (activeIdRef.current === target.id) {
         setActiveId(null);
@@ -2128,7 +2144,7 @@ export default function ChatDashboard() {
     } catch {
       // 忽略
     }
-  }, [pendingDelete]);
+  }, [pendingDelete, identityQuery]);
 
   const handleNewChat = useCallback(async () => {
     if (sendingRef.current) return;

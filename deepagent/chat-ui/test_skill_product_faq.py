@@ -25,6 +25,12 @@ import urllib.request
 from pathlib import Path
 
 BASE = "http://127.0.0.1:8765"
+
+# --- 会话隔离：会话接口要求声明调用方身份（见 server.py 会话隔离设计）---
+# 未带身份时：列表返回空、单会话按「不存在」返回 404。测试脚本必须带上。
+_IDENT = {"user_phone": '13912345678', "user_name": '系统管理员'}
+_Q = "user_phone=13912345678&user_name=%E7%B3%BB%E7%BB%9F%E7%AE%A1%E7%90%86%E5%91%98"
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
@@ -60,7 +66,7 @@ def post(path: str, payload: dict, timeout: int = 600):
 
 
 def delete_session(sid: str) -> None:
-    req = urllib.request.Request(f"{BASE}/api/sessions/{sid}", method="DELETE")
+    req = urllib.request.Request(f"{BASE}/api/sessions/{sid}?{_Q}", method="DELETE")
     try:
         urllib.request.urlopen(req, timeout=15).read()
     except (urllib.error.URLError, OSError):
@@ -72,7 +78,7 @@ atexit.register(lambda: [delete_session(s) for s in _SESSIONS])
 
 
 def new_session(title: str) -> str:
-    sid = json.loads(post("/api/sessions", {"title": title}).read())["id"]
+    sid = json.loads(post("/api/sessions", {"title": title, **_IDENT}).read())["id"]
     _SESSIONS.append(sid)
     return sid
 
@@ -182,7 +188,7 @@ def parse_frontmatter(path: Path) -> dict[str, str]:
 def main() -> int:
     print(f"服务: {BASE}")
     try:
-        with urllib.request.urlopen(BASE + "/api/sessions", timeout=10):
+        with urllib.request.urlopen(BASE + "/api/sessions?" + _Q, timeout=10):
             pass
     except (urllib.error.URLError, OSError) as e:
         print(f"\n服务未就绪：{e}\n请先启动 chat-ui（chat-ui/start.bat）。")

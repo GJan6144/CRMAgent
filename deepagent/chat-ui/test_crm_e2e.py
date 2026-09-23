@@ -19,6 +19,12 @@ from crm_data_guard import install_guard
 install_guard()
 
 BASE = "http://127.0.0.1:8765"
+
+# --- 会话隔离：会话接口要求声明调用方身份（见 server.py 会话隔离设计）---
+# 未带身份时：列表返回空、单会话按「不存在」返回 404。测试脚本必须带上。
+_IDENT = {"user_phone": '13912345678', "user_name": '系统管理员'}
+_Q = "user_phone=13912345678&user_name=%E7%B3%BB%E7%BB%9F%E7%AE%A1%E7%90%86%E5%91%98"
+
 CRM_LEADS = r"C:\Users\Administrator\Documents\deepagent\CRM_Agent1.0\data\leads.json"
 
 PASS = FAIL = 0
@@ -40,7 +46,7 @@ def leads_count():
 
 
 def make_session(title):
-    r = requests.post(f"{BASE}/api/sessions", json={"title": title}, timeout=15)
+    r = requests.post(f"{BASE}/api/sessions", json={"title": title, **_IDENT}, timeout=15)
     r.raise_for_status()
     return r.json()["id"]
 
@@ -50,7 +56,7 @@ def send(session_id, content, decide=None, timeout=600):
     events = []
     with requests.post(
         f"{BASE}/api/chat",
-        json={"session_id": session_id, "content": content, "use_search": False},
+        json={"session_id": session_id, "content": content, "use_search": False, **_IDENT},
         stream=True,
         timeout=timeout,
     ) as r:
@@ -74,6 +80,7 @@ def send(session_id, content, decide=None, timeout=600):
                     try:
                         requests.post(
                             f"{BASE}/api/chat/{session_id}/approve",
+                            params=_IDENT,
                             json={"approved": decide, "session_id": session_id},
                             timeout=15,
                         )
@@ -128,7 +135,7 @@ try:
     check("A4 有最终回复", len(reply.strip()) > 0, reply[:120])
     check("A5 未触发审批（读操作免审批）", kinds.get("approval_request", 0) == 0, str(kinds))
 finally:
-    requests.delete(f"{BASE}/api/sessions/{sid}", timeout=15)
+    requests.delete(f"{BASE}/api/sessions/{sid}", params=_IDENT, timeout=15)
 
 print()
 print("=" * 64)
@@ -168,7 +175,7 @@ try:
     errs = [e for e in evs if e.get("event") == "error"]
     check("B6 无错误事件", not errs, str(errs[:1]))
 finally:
-    requests.delete(f"{BASE}/api/sessions/{sid}", timeout=15)
+    requests.delete(f"{BASE}/api/sessions/{sid}", params=_IDENT, timeout=15)
 
 print()
 print("=" * 64)
@@ -203,7 +210,7 @@ try:
     check("C4 目标记录备注未变", bool(hit) and hit[0].get("remark", "") == ref_remark,
           str(hit[:1])[:160])
 finally:
-    requests.delete(f"{BASE}/api/sessions/{sid}", timeout=15)
+    requests.delete(f"{BASE}/api/sessions/{sid}", params=_IDENT, timeout=15)
 
 print()
 print("（删除操作的禁止策略由 test_crm_permissions.py 覆盖）")

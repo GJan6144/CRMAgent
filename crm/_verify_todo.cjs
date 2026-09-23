@@ -48,6 +48,45 @@ function check(name, cond, extra = "") {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 会话隔离：所有 /api/agent/sessions* 调用都必须带上**登录身份**。
+ * 服务端刻意设计为「未声明身份 → 列表返回空 / 单会话按不存在处理（404）」，
+ * 所以裸调这些接口的断言会全线假失败。
+ *
+ * 下面把身份查询串的构造注入页面上下文（从 localStorage 的 crm_auth 取），
+ * 再用 U(url) 包一层，避免 5 处调用各写一遍。
+ */
+const IDQ = `(() => { try {
+  const a = JSON.parse(localStorage.getItem('crm_auth') || '{}');
+  const u = a.user || {};
+  const p = new URLSearchParams();
+  if (u.phone) p.set('user_phone', u.phone);
+  if (u.name) p.set('user_name', u.name);
+  return p.toString();
+} catch (e) { return ''; } })()`;
+
+/** 把一段「用到 U(url) 的代码」包成可执行的页面表达式 */
+const withId = (body) =>
+  `(() => { const _q = ${IDQ};` +
+  ` const U = (p) => p + (_q ? (p.includes('?') ? '&' : '?') + _q : '');` +
+  ` return (async () => { ${body} })(); })()`;
+
+/**
+ * POST 建会话走**请求体**声明身份（不是查询串）。
+ * 注意：会话归属在创建时落库，缺失 → 该会话无归属 → 之后列表里看不到、
+ * 连自己发的消息都会被判 404。所以建会话时务必带上。
+ */
+const USER_JS = `(() => { try {
+  return JSON.parse(localStorage.getItem('crm_auth') || '{}').user || {};
+} catch (e) { return {}; } })()`;
+
+/** 把一段「用到 U(url) 与 UU（当前登录用户）的代码」包成可执行的页面表达式 */
+const withUser = (body) =>
+  `(() => { const _q = ${IDQ}; const _u = ${USER_JS};` +
+  ` const U = (p) => p + (_q ? (p.includes('?') ? '&' : '?') + _q : '');` +
+  ` const UU = { user_phone: _u.phone || '', user_name: _u.name || '' };` +
+  ` return (async () => { ${body} })(); })()`;
+
 /** 极简 CDP 客户端 */
 class CDP {
   constructor(ws) {
@@ -243,12 +282,6 @@ const activateExpr = (title) => `(() => {
     await cdp.send("Page.navigate", { url: `${BASE}/login` }, sessionId);
     await waitFor(cdp, sessionId, "!!document.querySelector('input[placeholder=\"请输入手机号\"]')", "登录页渲染");
 
-    const before = await evalJS(
-      cdp,
-      sessionId,
-      `fetch('/api/agent/sessions', { cache: 'no-store' }).then(r => r.json()).then(d => (d || []).map(s => s.id))`
-    );
-
     const loginRes = await evalJS(
       cdp,
       sessionId,
@@ -267,20 +300,32 @@ const activateExpr = (title) => `(() => {
     check("管理员登录成功并写入登录态", loginRes && loginRes.ok === true, JSON.stringify(loginRes));
     if (!loginRes || !loginRes.ok) throw new Error("登录失败，后续步骤无法进行");
 
+    // ⚠️ 基线必须在**登录之后**取：会话接口现在按身份过滤，未登录时列表恒为空。
+    //    若在登录前取，`before` = []，末尾「新增会话」的差集会把全部历史会话
+    //    误判成本次新建的 → 清理阶段会逐个 DELETE 掉管理员的真实会话。
+    const before = await evalJS(
+      cdp,
+      sessionId,
+      withId(
+        `return await fetch(U('/api/agent/sessions'), { cache: 'no-store' })` +
+          `.then(r => r.json()).then(d => (d || []).map(s => s.id));`
+      )
+    );
+
     /* ---------- 2. 新建专用会话并进入对话页 ---------- */
     console.log("\n=== 2. 新建专用会话并进入对话页 ===");
     const created = await evalJS(
       cdp,
       sessionId,
-      `(async () => {
-        const r = await fetch('/api/agent/sessions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: ${JSON.stringify(TITLE)} }),
-        });
-        const d = await r.json();
-        return r.ok ? { ok: true, id: d.id } : { ok: false, error: String(r.status) };
-      })()`
+      withUser(
+        `const r = await fetch('/api/agent/sessions', {` +
+          ` method: 'POST',` +
+          ` headers: { 'Content-Type': 'application/json' },` +
+          ` body: JSON.stringify({ title: ${JSON.stringify(TITLE)}, ...UU }),` +
+          ` });` +
+          ` const d = await r.json();` +
+          ` return r.ok ? { ok: true, id: d.id } : { ok: false, error: String(r.status) };`
+      )
     );
     check("已创建专用测试会话", created && created.ok === true, JSON.stringify(created));
     if (!created || !created.ok) throw new Error("创建会话失败，后续步骤无法进行");
@@ -431,10 +476,12 @@ const activateExpr = (title) => `(() => {
       const stored = await evalJS(
         cdp,
         sessionId,
-        `fetch('/api/agent/sessions/${sessionUnderTest}/messages', { cache: 'no-store' })
-           .then(r => r.json())
-           .then(d => (d || []).filter(m => m.role === 'assistant' && (m.todos || []).length > 0)
-             .map(m => ({ n: m.todos.length, done: m.todos.filter(t => t.status === 'completed').length, first: m.todos[0].content })))`
+        withId(
+          `return await fetch(U('/api/agent/sessions/${sessionUnderTest}/messages'), { cache: 'no-store' })` +
+            `.then(r => r.json())` +
+            `.then(d => (d || []).filter(m => m.role === 'assistant' && (m.todos || []).length > 0)` +
+            `.map(m => ({ n: m.todos.length, done: m.todos.filter(t => t.status === 'completed').length, first: m.todos[0].content })));`
+        )
       );
       check(
         "清单已随助手消息落库（接口能读到）",
@@ -448,9 +495,11 @@ const activateExpr = (title) => `(() => {
       const finalTitle = await evalJS(
         cdp,
         sessionId,
-        `fetch('/api/agent/sessions', { cache: 'no-store' })
-           .then(r => r.json())
-           .then(d => { const s = (d || []).find(x => x.id === ${JSON.stringify(sessionUnderTest)}); return s ? s.title : null; })`
+        withId(
+          `return await fetch(U('/api/agent/sessions'), { cache: 'no-store' })` +
+            `.then(r => r.json())` +
+            `.then(d => { const s = (d || []).find(x => x.id === ${JSON.stringify(sessionUnderTest)}); return s ? s.title : null; });`
+        )
       );
       check("会话标题已被首条提问自动改写", !!finalTitle && finalTitle !== TITLE, `title=${finalTitle}`);
       const reActivated = await waitFor(cdp, sessionId, activateExpr(finalTitle || TITLE), "刷新后切回测试会话", 30000);
@@ -472,7 +521,10 @@ const activateExpr = (title) => `(() => {
     const after = await evalJS(
       cdp,
       sessionId,
-      `fetch('/api/agent/sessions', { cache: 'no-store' }).then(r => r.json()).then(d => (d || []).map(s => s.id))`
+      withId(
+        `return await fetch(U('/api/agent/sessions'), { cache: 'no-store' })` +
+          `.then(r => r.json()).then(d => (d || []).map(s => s.id));`
+      )
     );
     const leaked = (after || []).filter((id) => !(before || []).includes(id));
     cleanupSessions.push(...leaked);
@@ -486,7 +538,9 @@ const activateExpr = (title) => `(() => {
         await evalJS(
           cdp,
           sessionId,
-          `fetch('/api/agent/sessions/${id}', { method: 'DELETE' }).then(r => r.status)`
+          withId(
+            `return await fetch(U('/api/agent/sessions/${id}'), { method: 'DELETE' }).then(r => r.status);`
+          )
         );
         console.log(`  (已清理测试会话 ${id})`);
       } catch {

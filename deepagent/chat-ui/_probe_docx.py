@@ -22,6 +22,12 @@ from pathlib import Path
 import requests
 
 BASE = "http://127.0.0.1:8765"
+
+# --- 会话隔离：会话接口要求声明调用方身份（见 server.py 会话隔离设计）---
+# 未带身份时：列表返回空、单会话按「不存在」返回 404。测试脚本必须带上。
+_IDENT = {"user_phone": '13912345678', "user_name": '系统管理员'}
+_Q = "user_phone=13912345678&user_name=%E7%B3%BB%E7%BB%9F%E7%AE%A1%E7%90%86%E5%91%98"
+
 TPL = r"C:\Users\Administrator\Documents\deepagent\crm_files\课程服务合同word模板.docx"
 OUT = r"C:\Users\Administrator\Documents\deepagent\crm_files\_e2e_合同_李四.docx"
 
@@ -69,7 +75,7 @@ def main() -> int:
     # 清理上次输出，避免 docx_fill_template 因「文件已存在」拒绝
     Path(OUT).unlink(missing_ok=True)
 
-    sid = requests.post(f"{BASE}/api/sessions", json={"title": "E2E-Word"}, timeout=20).json()["id"]
+    sid = requests.post(f"{BASE}/api/sessions", json={"title": "E2E-Word", **_IDENT}, timeout=20).json()["id"]
     print(f"会话: {sid}")
     print(f"提问: {prompt}\n" + "-" * 70)
 
@@ -106,6 +112,7 @@ def main() -> int:
                 print(f"[approval #{approved}] 自动批准")
                 requests.post(
                     f"{BASE}/api/chat/{sid}/approve",
+                    params=_IDENT,
                     json={"approved": True, "session_id": sid},
                     timeout=20,
                 )

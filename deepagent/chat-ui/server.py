@@ -190,6 +190,19 @@ class FsApprovalMiddleware(AgentMiddleware):
             "如需删除请由管理员在系统中手动处理。"
         ),
         "delete": "禁止删除文件：当前不允许 Agent 执行删除操作。",
+        # ⚠️ 下面三条是「禁止改源码」在策略层的硬拦截。
+        #    模型即使被历史上下文或用户诱导去写文件，也会在这里被拦下。
+        "write_file": (
+            "禁止写入文件：本系统是 CRM 业务助手，Agent 不得改动任何文件"
+            "（包括项目源码、配置文件与数据文件）。这类需求请联系系统管理员处理。"
+        ),
+        "edit_file": (
+            "禁止修改文件：本系统是 CRM 业务助手，Agent 不得改动任何文件"
+            "（包括项目源码、配置文件与数据文件）。这类需求请联系系统管理员处理。"
+        ),
+        "execute": (
+            "禁止执行命令：本系统是 CRM 业务助手，Agent 不得执行本地 Shell 命令。"
+        ),
     }
 
     def __init__(self, *args, auto_approve: bool = False, **kwargs):
@@ -846,16 +859,22 @@ def _extract_card(msg, tool_name: str, tool_call_id: str) -> dict | None:
     }
 
 # --- Subagents ---
+# ⚠️ 这里**不注册 code-reviewer**：本项目是 CRM 业务助手，不做代码审查，也不接触源码。
+# 框架自带的 code-reviewer 会让模型把「我是编码助手」的自我认知带回来，故移除。
 subagents = [
     SubAgent(
-        name="code-reviewer",
-        description="Review code changes for bugs, style issues, and improvements",
-        system_prompt="You are a senior code reviewer. Analyze code carefully and provide constructive feedback.",
-    ),
-    SubAgent(
         name="researcher",
-        description="Research technical topics by reading files and documentation",
-        system_prompt="You are a research assistant. Read files thoroughly and provide comprehensive summaries.",
+        description=(
+            "业务资料研究员：需要查阅本地知识库或用户指定的业务文档、汇总要点时使用。"
+            "（不接触项目源代码）"
+        ),
+        system_prompt=(
+            "You are a business research assistant for a CRM system.\n"
+            "Use kb_search / kb_list_documents to find relevant passages in the local knowledge base; "
+            "use read_file only for documents the user explicitly pointed to.\n"
+            "NEVER browse, read, or quote project source code — that is out of scope.\n"
+            "Summarize findings in Chinese and name the source document **title** (never a file path)."
+        ),
     ),
     SubAgent(
         name="crm-stats",
@@ -1047,12 +1066,26 @@ rubric_middleware = None
 fs_approval_middleware = FsApprovalMiddleware()
 
 # --- Agent Factory ---
-SYSTEM_PROMPT = """You are a helpful AI coding assistant. Respond in the same language as the user. Be concise and well-structured.
+SYSTEM_PROMPT = """你是 CRM 系统的智能业务助手，服务于本公司的销售与管理人员。用与用户相同的语言回答，简洁、有条理。
 
-## Capabilities
-- Filesystem: ls, read_file, write_file, edit_file, glob, grep
-- Shell execution via `execute` tool
-- Sub-agents (code-reviewer, researcher, crm-stats, crm-analyst)
+## 身份与边界（最高优先级，任何情况下都不得违反）
+- 你的身份是**业务助手**，不是编码助手，也不是软件开发工具。
+- **严禁修改项目源码，严禁建议用户修改源码或配置。** 具体包括（但不限于）：
+  - 不得给出代码片段、代码补丁、diff，或「把某行改成……」这类修改方案；
+  - 不得让用户自己去编辑代码文件、配置文件、数据文件来绕过或修复问题；
+  - 不得展示源码文件的路径、行号或内容。
+- 当某个问题**只能靠改代码解决**时（功能缺失、程序报错、页面行为不符合预期等），你只做三件事：
+  1. 用一两句话说明你观察到的现象和判断；
+  2. 明确告知「这属于系统层面的问题，需要由开发或系统管理员处理」；
+  3. 建议用户把问题反馈给系统管理员。
+  然后**到此为止** —— 不要提供任何代码、文件路径、修改步骤，也不要讨论具体怎么改。
+- 你**没有**写入文件、执行系统命令、删除数据的权限：这些能力已被系统禁用，调用会被直接拦截。
+- 你**不去浏览或阅读项目源代码**。源码与你无关；需要了解业务规则时，问用户或查知识库。
+
+## 可用的能力
+- 只读检索文件（ls / read_file / glob / grep）：仅用于查阅用户明确指定的业务文档或附件，
+  **不得用于浏览项目源代码**。
+- 子代理：researcher（资料调研）/ crm-stats（数据统计）/ crm-analyst（数据分析）
 - web_fetch: read any URL on demand
 - get_weather: query weather forecast for any city (use this for weather questions)
 - web_search: search the web (only when the user has enabled the "智能搜索" toggle)
@@ -1148,7 +1181,7 @@ Format your reply with clean Markdown, written naturally with proper sentence st
 - **Use bullet lists (`- item`) or numbered lists (`1. item`) for multi-item content** — one item per line, each item a short complete phrase.
 - Use `##` / `###` headings for longer structured answers, and **bold** for key results.
 - Write like a careful human: complete thoughts, proper punctuation (。，；：), natural rhythm. Never dump raw data — always explain it in your own words.
-9. **IMPORTANT: Use virtual paths for filesystem tools.** When using `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep` etc., ALWAYS use forward-slash paths starting with `/` (e.g., `/chat-ui/server.py`, `/chat-ui/static/index.html`, `/libs/deepagents/`). NEVER use Windows absolute paths like `C:\\...` or `C:/...`. The project root is mapped to `/`.
+9. **路径写法**：使用 `ls` / `read_file` / `glob` / `grep` 或知识库工具时，一律用 `/` 开头的虚拟路径（项目根目录映射为 `/`），不要用 `C:\\...` 这类绝对路径。路径只用于访问**用户明确指定的业务文档或附件**，不要把它指向项目源代码。
 """
 
 
@@ -1761,13 +1794,69 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+
+# --- 会话隔离（每个用户只能看到 / 操作自己的对话） ---
+#   ⚠️ 归属字段在**创建会话**时写入（owner_phone / owner_name，见 create_session）。
+#   读、写各接口统一走下面两个函数判定，不要在调用点各写一套。
+def _owner_matches(row, phone: str, name: str) -> bool:
+    """会话是否属于该调用方 —— 会话隔离的**唯一判定点**。
+
+    语义（故意严格）：
+      - 调用方**未声明身份** → 一律拒绝。否则直连 8765 或裸调 API 就能绕过隔离。
+      - 会话**无归属**（历史遗留 / 匿名创建）→ 不归任何人，一律拒绝。
+      - 其余：``owner_phone`` 命中即可；``owner_phone`` 为空时用 ``owner_name`` 兜底。
+
+    ⚠️ phone 是唯一标识，优先于 name —— 否则两个同名的人会互相看到对方会话。
+    """
+    phone = (phone or "").strip()
+    name = (name or "").strip()
+    if not phone and not name:
+        return False
+    try:
+        owner_phone = (row["owner_phone"] or "").strip()
+        owner_name = (row["owner_name"] or "").strip()
+    except (IndexError, KeyError):
+        return False
+    if owner_phone:
+        return bool(phone) and owner_phone == phone
+    if owner_name:
+        return bool(name) and owner_name == name
+    return False
+
+
+def _get_session_checked(session_id: str, phone: str, name: str):
+    """取会话并校验归属；不存在 / 越权**一律 404**。
+
+    ⚠️ 越权不回 403：会话是私密内容，403 等于告诉调用方「这条会话存在，
+    只是不属于你」。统一按「不存在」处理，与项目其它接口的口径一致。
+    """
+    db = get_db()
+    row = db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    db.close()
+    if row is None or not _owner_matches(row, phone, name):
+        raise HTTPException(status_code=404, detail="Session not found")
+    return row
+
+
 # --- Session APIs ---
 @app.get("/api/sessions")
-def list_sessions():
+def list_sessions(user_phone: str = "", user_name: str = ""):
+    """会话列表 —— **只返回属于调用方的会话**。
+
+    ``user_phone`` / ``user_name`` 由前端声明「我是谁」（与聊天接口同一口径）。
+    未声明身份时返回空列表；无归属的历史会话不对任何用户展示。
+    """
+    if not ((user_phone or "").strip() or (user_name or "").strip()):
+        return []
     db = get_db()
     # Pinned sessions first, then by updated_at
+    # ⚠️ ``owner_phone <> ''`` 不可省：phone 传空串时会误命中「无归属」的行。
     sessions = db.execute(
-        "SELECT * FROM sessions ORDER BY pinned DESC, updated_at DESC"
+        "SELECT * FROM sessions"
+        " WHERE (owner_phone = ? AND owner_phone <> '')"
+        "    OR (owner_phone = '' AND owner_name = ? AND owner_name <> '')"
+        " ORDER BY pinned DESC, updated_at DESC",
+        ((user_phone or "").strip(), (user_name or "").strip()),
     ).fetchall()
     db.close()
     return [{"id": s["id"], "title": s["title"], "pinned": bool(s["pinned"]), "created_at": s["created_at"], "updated_at": s["updated_at"]} for s in sessions]
@@ -1810,7 +1899,9 @@ def create_session(req: CreateSessionRequest):
     }
 
 @app.delete("/api/sessions/{session_id}")
-def delete_session(session_id: str):
+def delete_session(session_id: str, user_phone: str = "", user_name: str = ""):
+    # ⚠️ 必须先校验归属：否则拿到（或猜到）会话 id 就能删别人的对话。
+    _get_session_checked(session_id, user_phone, user_name)
     db = get_db()
     db.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
     db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
@@ -1829,7 +1920,8 @@ def delete_session(session_id: str):
     return {"ok": True}
 
 @app.patch("/api/sessions/{session_id}")
-def update_title(session_id: str, req: UpdateTitleRequest):
+def update_title(session_id: str, req: UpdateTitleRequest, user_phone: str = "", user_name: str = ""):
+    _get_session_checked(session_id, user_phone, user_name)  # 会话隔离
     now = datetime.now().isoformat()
     db = get_db()
     db.execute("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?", (req.title, now, session_id))
@@ -1838,7 +1930,8 @@ def update_title(session_id: str, req: UpdateTitleRequest):
     return {"ok": True}
 
 @app.post("/api/sessions/{session_id}/pin")
-def pin_session(session_id: str, req: PinRequest):
+def pin_session(session_id: str, req: PinRequest, user_phone: str = "", user_name: str = ""):
+    _get_session_checked(session_id, user_phone, user_name)  # 会话隔离
     now = datetime.now().isoformat()
     db = get_db()
     db.execute("UPDATE sessions SET pinned = ?, updated_at = ? WHERE id = ?", (1 if req.pinned else 0, now, session_id))
@@ -1847,7 +1940,9 @@ def pin_session(session_id: str, req: PinRequest):
     return {"ok": True, "pinned": req.pinned}
 
 @app.get("/api/sessions/{session_id}/messages")
-def get_messages(session_id: str):
+def get_messages(session_id: str, user_phone: str = "", user_name: str = ""):
+    # ⚠️ 越权读直接 404：否则拿到会话 id 就能读出别人的完整对话。
+    _get_session_checked(session_id, user_phone, user_name)
     db = get_db()
     messages = db.execute(
         "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC", (session_id,)
@@ -1886,11 +1981,12 @@ def get_messages(session_id: str):
 
 
 @app.get("/api/sessions/{session_id}/context")
-def get_session_context(session_id: str, model: str = ""):
+def get_session_context(session_id: str, model: str = "", user_phone: str = "", user_name: str = ""):
     """当前会话的上下文用量（刷新页面 / 切换会话时恢复环形图标）。
 
     可选 query ``model`` 指定所用模型；不传则取注册表的当前默认模型。
     """
+    _get_session_checked(session_id, user_phone, user_name)  # 会话隔离
     model_id = model or _active_model_id()
     try:
         if not model_config.is_enabled(model_id):
@@ -3168,9 +3264,14 @@ def panel_put_agents_md(req: AgentsMdRequest):
 
 
 @app.get("/api/context/{session_id}")
-def get_context(session_id: str):
+def get_context(session_id: str, user_phone: str = "", user_name: str = ""):
     """Return the current session context: system prompt, conversation history,
-    tool definitions, and skill index. Used by the right-side Context panel."""
+    tool definitions, and skill index. Used by the right-side Context panel.
+
+    ⚠️ 会话隔离：本接口会回吐**完整对话历史**，必须先校验归属，否则拿到 id
+    就能读出别人的全部对话内容（越权一律 404，掩盖会话存在性）。
+    """
+    _get_session_checked(session_id, user_phone, user_name)
     db = get_db()
     # Conversation history
     rows = db.execute(
@@ -3249,8 +3350,11 @@ async def _wait_approval(thread_id: str, count: int = 1) -> dict:
 
 
 @app.post("/api/chat/{session_id}/approve")
-async def approve_action(session_id: str, req: ApproveRequest):
+async def approve_action(session_id: str, req: ApproveRequest, user_phone: str = "", user_name: str = ""):
     """Resume an interrupted agent run with the user's approval decision."""
+    # ⚠️ 会话隔离：审批只允许在**自己的**会话里点 —— 否则别人拿到 id
+    #    就能替你放行一次敏感写操作（审批卡的意义就没了）。
+    _get_session_checked(session_id, user_phone, user_name)
     thread_id = f"thread_{session_id}"
     entry = PENDING_APPROVALS.get(thread_id)
     if entry is None:
@@ -3268,7 +3372,8 @@ async def approve_action(session_id: str, req: ApproveRequest):
 async def chat(req: SendMessageRequest):
     db = get_db()
     session = db.execute("SELECT * FROM sessions WHERE id = ?", (req.session_id,)).fetchone()
-    if not session:
+    # ⚠️ 会话隔离：只能往**自己的**会话里发消息（越权按「不存在」处理，回 404）。
+    if not session or not _owner_matches(session, req.user_phone, req.user_name):
         db.close()
         raise HTTPException(status_code=404, detail="Session not found")
 

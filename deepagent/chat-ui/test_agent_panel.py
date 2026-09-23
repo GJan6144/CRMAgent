@@ -13,6 +13,12 @@ import time
 import requests
 
 BASE = "http://127.0.0.1:8765"
+
+# --- 会话隔离：会话接口要求声明调用方身份（见 server.py 会话隔离设计）---
+# 未带身份时：列表返回空、单会话按「不存在」返回 404。测试脚本必须带上。
+_IDENT = {"user_phone": '13912345678', "user_name": '系统管理员'}
+_Q = "user_phone=13912345678&user_name=%E7%B3%BB%E7%BB%9F%E7%AE%A1%E7%90%86%E5%91%98"
+
 PASS = FAIL = 0
 
 
@@ -31,7 +37,7 @@ def api(method, path, **kw):
 
 
 def make_session(title):
-    r = api("POST", "/api/sessions", json={"title": title})
+    r = api("POST", "/api/sessions", json={"title": title, **_IDENT})
     r.raise_for_status()
     return r.json()["id"]
 
@@ -41,7 +47,7 @@ def send(session_id, content, decide=None, timeout=600):
     events = []
     with requests.post(
         f"{BASE}/api/chat",
-        json={"session_id": session_id, "content": content, "use_search": False},
+        json={"session_id": session_id, "content": content, "use_search": False, **_IDENT},
         stream=True,
         timeout=timeout,
     ) as r:
@@ -65,6 +71,7 @@ def send(session_id, content, decide=None, timeout=600):
                     try:
                         requests.post(
                             f"{BASE}/api/chat/{session_id}/approve",
+                            params=_IDENT,
                             json={"approved": decide, "session_id": session_id},
                             timeout=15,
                         )
@@ -169,14 +176,14 @@ check("A3.2 summary.disabled_tools 含 crm_query",
       "crm_query" in r.json()["summary"]["disabled_tools"], str(r.json()["summary"]["disabled_tools"]))
 sid = make_session("__面板测试_context__")
 try:
-    ctx = api("GET", f"/api/context/{sid}").json()
+    ctx = api("GET", f"/api/context/{sid}", params=_IDENT).json()
     ctx_names = [t["name"] for t in ctx.get("tools", [])]
     check("A3.3 context 工具清单不含已关闭工具", "crm_query" not in ctx_names, str(ctx_names))
     check("A3.4 context 工具带 enabled/policy 字段",
           all("policy" in t and "enabled" in t for t in ctx.get("tools", [])), "")
     check("A3.5 context.system_prompt 非空", len(ctx.get("system_prompt") or "") > 100, "")
 finally:
-    api("DELETE", f"/api/sessions/{sid}")
+    api("DELETE", f"/api/sessions/{sid}", params=_IDENT)
 
 # ---- A4 权限档变更 ----
 # 先恢复启用（A3 已把它关闭），再验证权限档切换
@@ -200,11 +207,11 @@ r = api("PUT", "/api/panel/system-prompt", json={"system_prompt": test_prompt})
 check("A5.1 保存系统提示词成功", r.status_code == 200 and r.json().get("is_custom") is True, str(r.text)[:200])
 sid = make_session("__面板测试_prompt__")
 try:
-    ctx = api("GET", f"/api/context/{sid}").json()
+    ctx = api("GET", f"/api/context/{sid}", params=_IDENT).json()
     check("A5.2 context.system_prompt 反映了自定义", test_prompt in (ctx.get("system_prompt") or ""),
           (ctx.get("system_prompt") or "")[:80])
 finally:
-    api("DELETE", f"/api/sessions/{sid}")
+    api("DELETE", f"/api/sessions/{sid}", params=_IDENT)
 r = api("POST", "/api/panel/system-prompt/reset")
 check("A5.3 重置后 is_custom=False", r.json().get("is_custom") is False, str(r.text)[:150])
 
@@ -218,11 +225,12 @@ check("A6.3 空提示词 → 400",
 r = reset_panel().json()
 s = r.get("summary", {})
 check("A7.1 恢复默认后无禁用工具", s.get("disabled_tools") == [], str(s.get("disabled_tools")))
-check("A7.2 恢复默认后 deny 为 crm_delete/delete",
-      set(s.get("deny_tools") or []) == {"crm_delete", "delete"}, str(s.get("deny_tools")))
-check("A7.3 恢复默认后 approval 含 CRM 写入 / 文件写入 / 知识库写入 / Word 模板",
+check("A7.2 恢复默认后 deny 为 crm_delete/delete/写文件/执行命令",
+      set(s.get("deny_tools") or []) == {"crm_delete", "delete", "write_file", "edit_file", "execute"},
+      str(s.get("deny_tools")))
+check("A7.3 恢复默认后 approval 含 CRM 写入 / 知识库写入 / Word 模板",
       set(s.get("approval_tools") or []) == {
-          "crm_create", "crm_update", "write_file", "edit_file",
+          "crm_create", "crm_update",
           "kb_ingest", "kb_delete_document", "docx_fill_template",
       },
       str(s.get("approval_tools")))
@@ -256,7 +264,7 @@ try:
         check("B1.2 无成功的 crm_query 执行", not ok_calls, str(ok_calls[:1])[:200])
         check("B1.3 无错误事件", k.get("error", 0) == 0, str(k))
     finally:
-        api("DELETE", f"/api/sessions/{sid}")
+        api("DELETE", f"/api/sessions/{sid}", params=_IDENT)
 
     # ---- B2 approval 档：弹审批卡并批准后执行 ----
     set_policy("crm_query", "approval")
@@ -274,7 +282,7 @@ try:
                   and e.get("tool_status") == "success" for e in evs), str(k))
         check("B2.4 无错误事件", k.get("error", 0) == 0, str(k))
     finally:
-        api("DELETE", f"/api/sessions/{sid}")
+        api("DELETE", f"/api/sessions/{sid}", params=_IDENT)
 
     # ---- B3 关闭档：模型不应成功调用 ----
     set_policy("crm_query", "allow")
@@ -304,7 +312,7 @@ try:
         check("B4.6 出现过工具调用（tool_calls>0）", after["usage"]["total"]["tool_calls"] > 0,
               str(after["usage"]["total"]))
     finally:
-        api("DELETE", f"/api/sessions/{sid}")
+        api("DELETE", f"/api/sessions/{sid}", params=_IDENT)
 
 finally:
     # 无论成败都恢复默认，避免污染后续使用

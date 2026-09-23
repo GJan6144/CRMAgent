@@ -489,7 +489,7 @@
             const view = document.getElementById('ctxContextView');
             view.innerHTML = '<div class="context-empty">加载中...</div>';
             try {
-                const res = await fetch(`/api/context/${sessionId}`);
+                const res = await fetch(withIdentity(`/api/context/${sessionId}`));
                 if (!res.ok) throw new Error('HTTP ' + res.status);
                 const data = await res.json();
                 renderContextView(data);
@@ -765,12 +765,23 @@
             aiRow.parentNode.insertBefore(card, aiRow);
             scrollToBottom();
         }
+        // --- 会话隔离：本页是无登录的本地调试界面 ---
+        // 用一个固定身份声明归属，这样它只看到自己创建的会话，
+        // 既不会与 CRM 里的真实用户会话互相串，也不会因为「未声明身份」而全空。
+        const LOCAL_PHONE = 'local-debug';
+        const LOCAL_NAME = '本地调试';
+        function withIdentity(url) {
+            const qs = 'user_phone=' + encodeURIComponent(LOCAL_PHONE)
+                     + '&user_name=' + encodeURIComponent(LOCAL_NAME);
+            return url + (url.indexOf('?') >= 0 ? '&' : '?') + qs;
+        }
+
         async function approveAction(btn, approved) {
             if (!currentSessionId) return;
             const inner = btn.closest('.approval-inner');
             inner.querySelectorAll('.approval-btn').forEach(b => b.disabled = true);
             try {
-                const res = await fetch(`/api/chat/${encodeURIComponent(currentSessionId)}/approve`, {
+                const res = await fetch(withIdentity(`/api/chat/${encodeURIComponent(currentSessionId)}/approve`), {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({approved: approved, session_id: currentSessionId}),
@@ -788,7 +799,7 @@
         }
 
         async function loadSessions() {
-            const res = await fetch('/api/sessions');
+            const res = await fetch(withIdentity('/api/sessions'));
             const sessions = await res.json();
             const list = document.getElementById('sessionList');
             list.innerHTML = '';
@@ -920,7 +931,7 @@
                 done = true;
                 const newTitle = input.value.trim();
                 if (save && newTitle && newTitle !== currentTitle) {
-                    await fetch(`/api/sessions/${id}`, { method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title: newTitle}) });
+                    await fetch(withIdentity(`/api/sessions/${id}`), { method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title: newTitle}) });
                     if (currentSessionId === id) document.getElementById('chatTitle').textContent = newTitle;
                 }
                 await loadSessions();
@@ -934,7 +945,7 @@
         }
 
         async function pinSession(id, newPinned) {
-            await fetch(`/api/sessions/${id}/pin`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({pinned: newPinned}) });
+            await fetch(withIdentity(`/api/sessions/${id}/pin`), { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({pinned: newPinned}) });
             // Close any open context menu
             document.querySelectorAll('.context-menu').forEach(m => m.remove());
             await loadSessions();
@@ -954,7 +965,7 @@
         async function confirmDeleteSession() {
             const id = document.getElementById('deleteModal').dataset.targetId;
             if (!id) return;
-            await fetch(`/api/sessions/${id}`, {method: 'DELETE'});
+            await fetch(withIdentity(`/api/sessions/${id}`), {method: 'DELETE'});
             if (currentSessionId === id) {
                 currentSessionId = null;
                 currentEmpty = true;
@@ -972,7 +983,7 @@
                 document.getElementById('chatInput').focus();
                 return;
             }
-            const res = await fetch('/api/sessions', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title: 'New Chat'}) });
+            const res = await fetch('/api/sessions', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title: 'New Chat', user_phone: LOCAL_PHONE, user_name: LOCAL_NAME}) });
             const session = await res.json();
             currentSessionId = session.id;
             currentEmpty = true;
@@ -989,8 +1000,8 @@
             container.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-secondary)">Loading...</div>';
             try {
                 const [msgRes, sessRes, fbRes] = await Promise.all([
-                    fetch(`/api/sessions/${id}/messages`),
-                    fetch('/api/sessions'),
+                    fetch(withIdentity(`/api/sessions/${id}/messages`)),
+                    fetch(withIdentity('/api/sessions')),
                     fetch(`/api/feedback/${id}`),
                 ]);
                 const messages = await msgRes.json();
@@ -1114,7 +1125,7 @@
                 const res = await fetch('/api/chat', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({session_id: currentSessionId, content, use_search: useSearch}),
+                    body: JSON.stringify({session_id: currentSessionId, content, use_search: useSearch, user_phone: LOCAL_PHONE, user_name: LOCAL_NAME}),
                     signal: signal,
                 });
                 const reader = res.body.getReader();

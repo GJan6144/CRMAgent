@@ -46,6 +46,12 @@ import server as S  # noqa: E402
 _SERDE = JsonPlusSerializer()
 
 BASE = "http://127.0.0.1:8765"
+
+# --- 会话隔离：会话接口要求声明调用方身份（见 server.py 会话隔离设计）---
+# 未带身份时：列表返回空、单会话按「不存在」返回 404。测试脚本必须带上。
+_IDENT = {"user_phone": '13912345678', "user_name": '系统管理员'}
+_Q = "user_phone=13912345678&user_name=%E7%B3%BB%E7%BB%9F%E7%AE%A1%E7%90%86%E5%91%98"
+
 AGENT_STATE_DB = HERE / "agent_state.db"
 AGENT_CONFIG = HERE / "agent_config.json"
 
@@ -113,7 +119,7 @@ _SESSIONS: list[str] = []
 def _drop_sessions() -> None:
     for sid in _SESSIONS:
         try:
-            req = urllib.request.Request(f"{BASE}/api/sessions/{sid}", method="DELETE")
+            req = urllib.request.Request(f"{BASE}/api/sessions/{sid}?{_Q}", method="DELETE")
             urllib.request.urlopen(req, timeout=15).read()
         except Exception:  # noqa: BLE001
             pass
@@ -132,7 +138,7 @@ class Turn:
         self.tool_calls: list[str] = []
         self.read_paths: list[str] = []
         self._timeout = timeout
-        self.sid = json.loads(post("/api/sessions", {"title": "skill 运行时验证"}).read())["id"]
+        self.sid = json.loads(post("/api/sessions", {"title": "skill 运行时验证", **_IDENT}).read())["id"]
         _SESSIONS.append(self.sid)
 
     def run(self) -> "Turn":

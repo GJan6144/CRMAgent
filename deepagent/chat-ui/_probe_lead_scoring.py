@@ -20,6 +20,12 @@ from datetime import datetime
 import requests
 
 BASE = "http://127.0.0.1:8765"
+
+# --- 会话隔离：会话接口要求声明调用方身份（见 server.py 会话隔离设计）---
+# 未带身份时：列表返回空、单会话按「不存在」返回 404。测试脚本必须带上。
+_IDENT = {"user_phone": '13912345678', "user_name": '系统管理员'}
+_Q = "user_phone=13912345678&user_name=%E7%B3%BB%E7%BB%9F%E7%AE%A1%E7%90%86%E5%91%98"
+
 DEFAULT_PROMPT = "帮我对所有 未成单的最后20条 线索评估打分，打分后，将总分大于等于 80 分的 未成单的线索信息 通过 飞书 发给 刘健"
 
 
@@ -51,7 +57,7 @@ def as_dict(raw) -> dict:
 def main() -> int:
     prompt = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_PROMPT
     title = f"E2E-评分-{datetime.now().strftime('%H%M%S')}"
-    sid = requests.post(f"{BASE}/api/sessions", json={"title": title}, timeout=20).json()["id"]
+    sid = requests.post(f"{BASE}/api/sessions", json={"title": title, **_IDENT}, timeout=20).json()["id"]
     print(f"会话: {sid}  「{title}」")
     print(f"提问: {prompt}\n" + "-" * 70)
 
@@ -81,6 +87,7 @@ def main() -> int:
             elif kind == "approval_request":
                 print("[approval] 自动批准")
                 requests.post(f"{BASE}/api/chat/{sid}/approve",
+                              params=_IDENT,
                               json={"approved": True, "session_id": sid}, timeout=20)
             elif kind == "error":
                 errors.append(str(ev))
@@ -120,7 +127,7 @@ def main() -> int:
 
     # 清理测试会话
     try:
-        requests.delete(f"{BASE}/api/sessions/{sid}", timeout=20)
+        requests.delete(f"{BASE}/api/sessions/{sid}", params=_IDENT, timeout=20)
         print(f"\n已清理会话 {sid}")
     except Exception:
         pass
